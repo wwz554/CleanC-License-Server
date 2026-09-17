@@ -1,7 +1,7 @@
-import { validPasswordAdminSession } from './admin-password';
 import type { Env } from './worker';
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}): Response {
   return Response.json(data, {
@@ -46,6 +46,12 @@ function b64url(data: ArrayBuffer | Uint8Array): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
+function unb64url(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
 function safeEqual(a: string, b: string): boolean {
   const x = encoder.encode(a);
   const y = encoder.encode(b);
@@ -64,6 +70,25 @@ async function hmac(secret: string, text: string): Promise<string> {
     ['sign'],
   );
   return b64url(await crypto.subtle.sign('HMAC', key, encoder.encode(text)));
+}
+
+function getCookie(request: Request, name: string): string {
+  return (request.headers.get('cookie') || '')
+    .split(/;\s*/)
+    .find(value => value.startsWith(name + '='))
+    ?.slice(name.length + 1) || '';
+}
+
+async function validAdminSession(request: Request, env: Env): Promise<boolean> {
+  const [payload, signature] = getCookie(request, 'cleanc_session').split('.');
+  if (!payload || !signature) return false;
+  if (!safeEqual(signature, await hmac(env.SESSION_SECRET, payload))) return false;
+  try {
+    const parsed = JSON.parse(decoder.decode(unb64url(payload))) as { exp?: number };
+    return typeof parsed.exp === 'number' && parsed.exp > Date.now();
+  } catch {
+    return false;
+  }
 }
 
 async function createSession(env: Env): Promise<string> {
@@ -198,7 +223,7 @@ export async function handleAdminTurnstile(request: Request, env: Env): Promise<
   const path = url.pathname;
 
   if ((path === '/admin' || path === '/admin/' || path === '/admin/login') && request.method === 'GET') {
-    if (await validPasswordAdminSession(request, env)) return null;
+    if (await validAdminSession(request, env)) return null;
     const siteKey = String(env.TURNSTILE_SITE_KEY || '').trim();
     if (!siteKey || !String(env.TURNSTILE_SECRET || '').trim()) {
       return html('<!doctype html><meta charset="utf-8"><title>CleanC</title><p style="font:16px sans-serif;padding:24px">后台 Turnstile 尚未配置，请在 Cloudflare Pages 中设置 TURNSTILE_SITE_KEY 和 TURNSTILE_SECRET。</p>', 503);
