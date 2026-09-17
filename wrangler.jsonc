@@ -15,6 +15,7 @@
   "vars": {
     "APP_NAME": "CleanC",
     "TURNSTILE_SITE_KEY": "TODO_TURNSTILE_SITE_KEY",
-    "LEASE_HOURS": "72"
+    "LEASE_HOURS": "72",
+    "BOOTSTRAP_BASE_URL": ""
   }
 }
