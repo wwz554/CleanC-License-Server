@@ -1,210 +1,98 @@
 # CleanC License Server
 
-CleanC License Server 是给 CleanC Windows 客户端使用的授权服务端，基于 **Cloudflare Workers + D1 + Turnstile**。
+CleanC License Server 是一个基于 **Cloudflare Workers + D1 + Turnstile** 的授权服务，包含管理员 Web 控制台、授权码管理、设备绑定、设备签名验证、短期租约、动态主域名以及 GitHub Actions 自动部署。
 
-它包含：
-
-- 管理后台 `/admin`
-- 管理员密码 + Cloudflare Turnstile 双重登录验证
-- 随机授权码、自定义授权码、批量生成
-- 永久授权、激活后 N 天、固定到期时间
-- 每个授权码可限制设备数量
-- 设备绑定、解绑、重新绑定
-- 授权禁用 / 恢复
-- 操作审计日志
-- P-256 / ECDSA 数字签名租约
-- 设备 Challenge / Verify 验证
-- 动态主授权域名
-- 稳定 Bootstrap 地址
-- GitHub Actions 自动部署
-
-> **非常重要：** 不要把管理员密码、Turnstile Secret、签名私钥、Cloudflare API Token 写进 GitHub 代码。它们必须放在 Cloudflare Secret 或 GitHub Actions Secret 中。
+> 本仓库是公开仓库。**管理员密码、Turnstile Secret、签名私钥、Cloudflare API Token 等敏感内容绝对不要写进代码或提交到 GitHub。** 它们必须放在 Cloudflare Secret 或 GitHub Actions Secret 中。
 
 ---
 
-# 1. 项目结构
+## 一、当前架构
 
 ```text
-CleanC-License-Server/
-├─ .github/
-│  └─ workflows/
-│     └─ deploy.yml
-├─ migrations/
-│  └─ 0001_init.sql
-├─ src/
-│  └─ index.ts
-├─ .env.example
-├─ .gitignore
-├─ package.json
-├─ tsconfig.json
-├─ wrangler.jsonc
-└─ README.md
+CleanC Windows 客户端
+        │
+        │  Bootstrap / API
+        ▼
+Cloudflare Worker
+        │
+        ├── 管理后台 /admin
+        ├── 授权 API /api/v1/*
+        ├── Bootstrap /bootstrap/v1/config
+        ├── Turnstile 服务端校验
+        └── D1 数据库
+                ├── licenses
+                ├── devices
+                ├── device_challenges
+                ├── audit_logs
+                ├── rate_limits
+                └── system_settings
 ```
 
-核心组件：
-
-| 组件 | 用途 |
-|---|---|
-| Cloudflare Worker | 运行授权 API 和后台管理网页 |
-| Cloudflare D1 | 保存授权码、设备、日志、系统设置 |
-| Cloudflare Turnstile | 管理员登录和修改域名时的人机验证 |
-| Cloudflare Secret | 保存管理员密码、Session Secret、Turnstile Secret、授权签名私钥 |
-| GitHub Actions | main 分支更新后自动执行 TypeScript 检查、D1 Migration 和 Worker 部署 |
-
----
-
-# 2. 当前主要 API
-
-客户端接口：
+核心文件：
 
 ```text
-POST /api/v1/license/activate
-POST /api/v1/license/validate
-POST /api/v1/license/refresh
-POST /api/v1/device/challenge
-POST /api/v1/device/verify
-GET  /api/v1/health
-GET  /api/v1/meta
-GET  /bootstrap/v1/config
-```
-
-后台：
-
-```text
-/admin
-```
-
-健康检查：
-
-```text
-https://你的-worker地址/api/v1/health
-```
-
-正常返回示例：
-
-```json
-{
-  "status": "ok",
-  "apiVersion": 1
-}
+src/index.ts          Worker 入口，仅转发到 worker.ts
+src/worker.ts         后端、授权、安全、D1、API
+src/admin.ts          管理后台页面
+migrations/           D1 数据库迁移
+wrangler.jsonc        Cloudflare Worker 配置
+.github/workflows/    GitHub Actions 自动部署
 ```
 
 ---
 
-# 3. 授权逻辑说明
+## 二、代码审查后已经修正的关键问题
 
-## 3.1 激活
+这次对仓库代码逐段检查后做了以下调整：
 
-客户端第一次提交：
+1. **把原来超过 4 万字符的单文件拆分**为 `index.ts + worker.ts + admin.ts`，以后检查、维护和 GitHub 读取都更稳定。
+2. **设备签名不再只是“摆设”**。现在 `validate/refresh` 必须带设备私钥签名后换取的短期 `deviceProof`，仅知道 `licenseKey + deviceId` 不能直接续租。
+3. 设备 challenge 现在同时绑定 **licenseId + deviceId**，避免同一个 deviceId 出现在不同授权下造成验证歧义。
+4. 激活时强制校验设备提交的 **P-256 SPKI 公钥**；已绑定设备再次激活时，公钥不一致会拒绝。
+5. challenge 是一次性的，成功使用后写入 `used_at`，防止重复使用。
+6. `deviceProof` 使用 HMAC 保护，默认 10 分钟有效，只能用于对应授权和设备。
+7. Worker 返回的 Bootstrap 和租约增加 `signedPayload`，Windows 客户端可以直接验证服务器签名的原始字节，避免不同语言 JSON 序列化顺序造成验签不一致。
+8. 登录限流改为单条 D1 UPSERT + RETURNING，减少并发条件下的计数竞争。
+9. 管理后台增加退出登录接口，并清除 Session Cookie。
+10. 自定义主域名检测不再只判断 `/health = ok`，还要求返回 CleanC 服务标识，避免误把其他网站设成授权服务器。
+11. 随机授权码生成去掉简单取模带来的轻微分布偏差。
+12. 批量授权码单次最大调整为 **15 个**，避免 Cloudflare D1 免费版单次 Worker 调用查询数量限制。需要更多授权码时连续生成多批即可。
+13. `BOOTSTRAP_BASE_URL` 改为必须显式配置的固定 `workers.dev` 地址，确保以后更换正式域名时客户端仍有稳定的兜底入口。
+14. GitHub Actions 在部署前会主动检查 D1 ID、Turnstile Site Key、Bootstrap 地址和 Cloudflare CI 凭据，缺任何一项都会给出明确错误。
 
-```json
-{
-  "licenseKey": "CLC-XXXX-XXXX-XXXX-XXXX",
-  "deviceId": "设备唯一ID",
-  "devicePublicKey": "设备P-256公钥PEM",
-  "deviceName": "DESKTOP-XXXX",
-  "windowsVersion": "Windows 11",
-  "appVersion": "1.0.0"
-}
-```
-
-服务端会：
-
-1. 检查授权码是否存在。
-2. 检查授权是否被禁用。
-3. 检查授权是否已经过期。
-4. 检查设备数量是否超过上限。
-5. 绑定设备。
-6. 如果是“激活后 N 天”，从第一次激活开始计算到期时间。
-7. 生成带 ECDSA P-256 签名的短期 Lease。
-
-## 3.2 Validate / Refresh
-
-`validate` 和 `refresh` **不会自动新增设备绑定**。
-
-设备必须已经通过 `activate` 完成绑定，否则返回：
-
-```text
-DEVICE_NOT_BOUND
-```
-
-这样可以避免有人把 validate/refresh 当成第二个激活接口绕过原始激活流程。
-
-## 3.3 Lease 到期时间
-
-默认：
-
-```text
-LEASE_HOURS = 72
-```
-
-也就是每次服务端签发的短期 Lease 最多 72 小时。
-
-如果授权本身比 72 小时更早到期，Lease 会自动缩短到授权的实际到期时间，不会出现“授权已经过期，但旧 Lease 还能继续有效几天”的问题。
-
-## 3.4 设备解绑
-
-后台点“解绑”后：
-
-- 释放设备名额；
-- 原设备记录保留用于审计；
-- 同一设备以后允许重新激活绑定。
+> 没有任何网络授权系统能够做到“绝对无法破解”。这里的设计目标是：服务器拥有最终授权权威、客户端不保存服务器私钥、租约有时效、设备私钥参与续租，并尽量提高伪造和复制授权的成本。
 
 ---
 
-# 4. Cloudflare 从零部署——保姆级教程
+# 三、Cloudflare 从零搭建：保姆级教程
 
-下面按第一次部署的实际顺序操作。
+下面按第一次部署的顺序操作。建议严格按顺序执行。
 
----
+## 第 0 步：准备内容
 
-# 5. 第一步：准备 Cloudflare 账号
+你需要：
 
-打开：
+- 一个 Cloudflare 账号；
+- 一个 GitHub 账号；
+- 本仓库；
+- Windows 电脑安装 Node.js 20 或 22；
+- Git；
+- OpenSSL。Git for Windows 自带的 Git Bash 通常可直接使用 OpenSSL。
 
-```text
-https://dash.cloudflare.com/
-```
+确认 Node.js：
 
-登录你的 Cloudflare 账号。
-
-后面会用到：
-
-- Workers & Pages
-- D1
-- Turnstile
-- API Tokens
-
-如果暂时没有自己的域名，也完全可以先部署。
-
-第一次先使用 Cloudflare 自动分配的：
-
-```text
-xxxx.workers.dev
-```
-
-以后有域名再绑定。
-
----
-
-# 6. 第二步：安装 Node.js
-
-电脑建议安装 Node.js 22 LTS 或当前稳定版。
-
-检查：
-
-```bash
+```powershell
 node -v
 npm -v
 ```
 
-如果能看到版本号即可。
-
 ---
 
-# 7. 第三步：下载 GitHub 项目
+## 第 1 步：把仓库克隆到电脑
 
-```bash
+打开 PowerShell：
+
+```powershell
 git clone https://github.com/wwz554/CleanC-License-Server.git
 cd CleanC-License-Server
 npm install
@@ -212,41 +100,75 @@ npm install
 
 检查 TypeScript：
 
-```bash
+```powershell
 npm run typecheck
 ```
 
-如果没有报错，说明代码可以通过 TypeScript 静态检查。
+正常情况下不应出现 TypeScript 错误。
 
 ---
 
-# 8. 第四步：登录 Wrangler
+## 第 2 步：登录 Cloudflare Wrangler
 
 执行：
 
-```bash
+```powershell
 npx wrangler login
 ```
 
 浏览器会打开 Cloudflare 授权页面。
 
-选择你的 Cloudflare 账号并授权。
+登录你的 Cloudflare 账号后点 **Allow / 允许**。
 
-登录成功以后可以执行：
+确认登录状态：
 
-```bash
+```powershell
 npx wrangler whoami
 ```
 
-确认当前 Cloudflare 账号。
+---
+
+## 第 3 步：确认 workers.dev 子域名
+
+Cloudflare Dashboard：
+
+```text
+Workers & Pages
+→ Overview
+→ 右侧或顶部查看 Your subdomain
+```
+
+假设你的 Cloudflare Workers 子域名是：
+
+```text
+abc123.workers.dev
+```
+
+本项目 Worker 名称固定是：
+
+```text
+cleanc-license-server
+```
+
+那么最终默认 Worker 地址就是：
+
+```text
+https://cleanc-license-server.abc123.workers.dev
+```
+
+记住这个地址，后面配置 `BOOTSTRAP_BASE_URL` 和 Turnstile 都要使用。
+
+**不要关闭 workers.dev。**
+
+这个地址是 CleanC 客户端的长期 Bootstrap 兜底地址。正式域名以后可以换，但是 Bootstrap 建议一直保留。
 
 ---
 
-# 9. 第五步：创建 D1 数据库
+## 第 4 步：创建 D1 数据库
 
-在项目目录执行：
+在项目目录运行：
 
-```bash
+```powershell
 npx wrangler d1 create cleanc-license
 ```
 
@@ -257,7 +179,7 @@ database_name = "cleanc-license"
 database_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
 
-请复制 `database_id`。
+复制 `database_id`。
 
 打开：
 
@@ -271,64 +193,62 @@ wrangler.jsonc
 "database_id": "TODO_D1_DATABASE_ID"
 ```
 
-改成真实 ID：
+替换成真实 D1 ID，例如：
 
 ```json
 "database_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
 
-注意：
+不要修改：
 
-- 这里的 Database ID 不是密码，可以写进仓库；
-- 不要改 `binding: "DB"`；
-- 不要改数据库名 `cleanc-license`，除非你同时修改 GitHub Actions 和脚本。
+```json
+"binding": "DB"
+```
+
+Worker 代码就是通过 `env.DB` 使用这个数据库。
 
 ---
 
-# 10. 第六步：创建 Turnstile
+## 第 5 步：创建 Turnstile
 
-Cloudflare 控制台进入：
+进入 Cloudflare Dashboard：
 
 ```text
 Turnstile
+→ Add widget
 ```
 
-点击：
+建议：
 
 ```text
-Add widget
+Widget name: CleanC License Admin
+Widget mode: Managed
 ```
 
-名称可以填写：
+Hostname Management 里首先加入你的 workers.dev 主机名，例如：
 
 ```text
-CleanC License Server
+cleanc-license-server.abc123.workers.dev
 ```
 
-Widget Mode 建议：
+只填主机名，不要填写：
 
 ```text
-Managed
+https://
+/admin
+/
 ```
 
-第一次部署时还不知道最终 workers.dev 地址，可以先完成 Worker 第一次部署后，再回来把真实 hostname 添加进去。
-
-创建成功后你会得到：
+创建后 Cloudflare 会给你两个值：
 
 ```text
 Site Key
 Secret Key
 ```
 
-两者用途不同。
+### Site Key
 
-## Site Key
-
-Site Key 可以公开，写入：
-
-```text
-wrangler.jsonc
-```
+Site Key 是公开值，可以放在 `wrangler.jsonc`。
 
 找到：
 
@@ -336,305 +256,27 @@ wrangler.jsonc
 "TURNSTILE_SITE_KEY": "TODO_TURNSTILE_SITE_KEY"
 ```
 
-替换成你的真实 Site Key。
+替换为实际 Site Key。
 
-## Secret Key
+### Secret Key
 
-Secret Key 绝对不要写进 GitHub。
+Secret Key 是私密值。
+
+**绝对不要写进 GitHub。**
 
 后面使用：
 
-```bash
+```powershell
 npx wrangler secret put TURNSTILE_SECRET
 ```
 
-保存。
+录入。
+
+Cloudflare 官方要求 Turnstile 必须进行服务端 Siteverify 校验；本项目已经实现，并且还会检查返回的 hostname 是否与当前管理后台域名一致。
 
 ---
 
-# 11. 第七步：生成授权签名 P-256 密钥
-
-这个密钥非常重要。
-
-服务端保存：
-
-```text
-私钥
-```
-
-Windows CleanC 客户端内置：
-
-```text
-公钥
-```
-
-客户端利用公钥验证服务端 Lease 是否真的由你的服务器签发。
-
-## Windows 有 OpenSSL 的情况
-
-执行：
-
-```bash
-openssl ecparam -name prime256v1 -genkey -noout -out ec-private-sec1.pem
-openssl pkcs8 -topk8 -nocrypt -in ec-private-sec1.pem -out cleanc-private.pem
-openssl pkey -in cleanc-private.pem -pubout -out cleanc-public.pem
-```
-
-会生成：
-
-```text
-cleanc-private.pem
-cleanc-public.pem
-```
-
-### cleanc-private.pem
-
-只放 Cloudflare Secret。
-
-绝对不要：
-
-- 上传 GitHub
-- 放 Windows 客户端
-- 发给别人
-- 写进 README
-
-### cleanc-public.pem
-
-可以放 CleanC Windows 客户端中。
-
-客户端只需要公钥，不能使用私钥。
-
----
-
-# 12. 第八步：配置四个 Cloudflare Secret
-
-项目需要四个 Secret：
-
-```text
-ADMIN_PASSWORD
-SESSION_SECRET
-TURNSTILE_SECRET
-LICENSE_SIGNING_PRIVATE_KEY
-```
-
-## 12.1 ADMIN_PASSWORD
-
-执行：
-
-```bash
-npx wrangler secret put ADMIN_PASSWORD
-```
-
-终端提示输入时，输入你的后台管理员密码。
-
-不要把真实管理员密码提交到 GitHub。
-
-## 12.2 SESSION_SECRET
-
-先生成一段随机值：
-
-```bash
-openssl rand -base64 48
-```
-
-复制结果。
-
-然后：
-
-```bash
-npx wrangler secret put SESSION_SECRET
-```
-
-粘贴刚才生成的随机字符串。
-
-## 12.3 TURNSTILE_SECRET
-
-```bash
-npx wrangler secret put TURNSTILE_SECRET
-```
-
-输入 Turnstile 的 Secret Key。
-
-## 12.4 LICENSE_SIGNING_PRIVATE_KEY
-
-执行：
-
-```bash
-npx wrangler secret put LICENSE_SIGNING_PRIVATE_KEY
-```
-
-输入 `cleanc-private.pem` 的完整内容，包括：
-
-```text
------BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-```
-
-如果命令行多行粘贴不方便，也可以在 Cloudflare Worker 控制台：
-
-```text
-Workers & Pages
-→ 你的 Worker
-→ Settings
-→ Variables and Secrets
-→ Add
-→ Secret
-```
-
-手工添加。
-
----
-
-# 13. 第九步：初始化 D1 表结构
-
-项目已经包含：
-
-```text
-migrations/0001_init.sql
-```
-
-执行远程 Migration：
-
-```bash
-npm run db:remote
-```
-
-等价于：
-
-```bash
-npx wrangler d1 migrations apply cleanc-license --remote
-```
-
-看到 Migration 成功即可。
-
-数据库会创建：
-
-```text
-licenses
-devices
-audit_logs
-system_settings
-domain_history
-device_challenges
-rate_limits
-```
-
----
-
-# 14. 第十步：第一次部署 Worker
-
-执行：
-
-```bash
-npm run deploy
-```
-
-或者：
-
-```bash
-npx wrangler deploy
-```
-
-成功后 Wrangler 会显示一个 Worker 地址，例如：
-
-```text
-https://cleanc-license-server.xxxxx.workers.dev
-```
-
-请保存这个地址。
-
----
-
-# 15. 第十一步：测试 Worker
-
-浏览器打开：
-
-```text
-https://cleanc-license-server.xxxxx.workers.dev/api/v1/health
-```
-
-正常应该显示：
-
-```json
-{
-  "status": "ok",
-  "apiVersion": 1
-}
-```
-
-然后打开：
-
-```text
-https://cleanc-license-server.xxxxx.workers.dev/admin
-```
-
-应该看到 CleanC License 管理后台。
-
----
-
-# 16. 第十二步：把 workers.dev 加入 Turnstile Hostname Management
-
-回到 Cloudflare：
-
-```text
-Turnstile
-→ CleanC License Server
-→ Settings
-→ Hostname Management
-```
-
-添加你的 hostname，例如：
-
-```text
-cleanc-license-server.xxxxx.workers.dev
-```
-
-这里只填写 hostname，不要填写：
-
-```text
-https://
-```
-
-也不要加：
-
-```text
-/admin
-```
-
-正确：
-
-```text
-cleanc-license-server.xxxxx.workers.dev
-```
-
-错误：
-
-```text
-https://cleanc-license-server.xxxxx.workers.dev/admin
-```
-
----
-
-# 17. 第十三步：固定 BOOTSTRAP_BASE_URL
-
-这是非常重要的一步。
-
-Bootstrap 的作用是：
-
-即使以后你把正式授权域名从：
-
-```text
-license.old-domain.com
-```
-
-换成：
-
-```text
-license.new-domain.com
-```
-
-客户端仍然可以通过固定的 workers.dev 地址查询当前正式 API 地址。
+## 第 6 步：填写固定 Bootstrap 地址
 
 打开：
 
@@ -645,338 +287,234 @@ wrangler.jsonc
 找到：
 
 ```json
-"BOOTSTRAP_BASE_URL": ""
+"BOOTSTRAP_BASE_URL": "TODO_BOOTSTRAP_BASE_URL"
 ```
 
-填写刚才真实的 workers.dev 地址：
+替换为第 3 步得到的完整 Worker 地址，例如：
 
 ```json
-"BOOTSTRAP_BASE_URL": "https://cleanc-license-server.xxxxx.workers.dev"
+"BOOTSTRAP_BASE_URL": "https://cleanc-license-server.abc123.workers.dev"
 ```
 
-不要在最后加 `/`。
+结尾不要加 `/`。
 
-然后再次部署：
+正确：
+
+```text
+https://cleanc-license-server.abc123.workers.dev
+```
+
+不建议：
+
+```text
+https://cleanc-license-server.abc123.workers.dev/
+```
+
+---
+
+## 第 7 步：生成服务器 P-256 签名密钥
+
+这个私钥用于服务器给 Bootstrap 配置和 License Lease 签名。
+
+Windows 推荐打开 **Git Bash**，进入项目目录执行：
 
 ```bash
+openssl ecparam -name prime256v1 -genkey -noout -out ec-private-sec1.pem
+openssl pkcs8 -topk8 -nocrypt -in ec-private-sec1.pem -out cleanc-private.pem
+openssl pkey -in cleanc-private.pem -pubout -out cleanc-public.pem
+```
+
+得到：
+
+```text
+cleanc-private.pem   服务器私钥
+cleanc-public.pem    客户端公钥
+```
+
+### cleanc-private.pem
+
+只能放 Cloudflare Secret。
+
+**绝对不要上传 GitHub。**
+
+### cleanc-public.pem
+
+可以嵌入 CleanC Windows 客户端，用来验证服务器签名。
+
+客户端必须只信任你内置的服务器公钥，而不是从授权服务器下载一个新的公钥再信任，否则攻击者替换服务器时也可以同时替换公钥。
+
+---
+
+## 第 8 步：生成两个随机 Secret
+
+在 Git Bash 执行两次：
+
+```bash
+openssl rand -base64 48
+```
+
+分别用作：
+
+```text
+SESSION_SECRET
+DEVICE_PROOF_SECRET
+```
+
+它们必须是两个不同的随机值。
+
+不要使用简单密码，也不要与管理员密码相同。
+
+---
+
+## 第 9 步：第一次部署 Worker
+
+先执行数据库迁移：
+
+```powershell
+npm run db:remote
+```
+
+或者：
+
+```powershell
+npx wrangler d1 migrations apply cleanc-license --remote
+```
+
+确认时输入 `y`。
+
+然后先部署一次 Worker：
+
+```powershell
 npm run deploy
 ```
 
-此后 Bootstrap 地址固定为：
+或者：
 
-```text
-https://cleanc-license-server.xxxxx.workers.dev/bootstrap/v1/config
+```powershell
+npx wrangler deploy
 ```
 
-建议 Windows 客户端永远内置这个 Bootstrap URL，而不是直接把未来的正式域名写死。
+Cloudflare 应返回类似：
+
+```text
+https://cleanc-license-server.abc123.workers.dev
+```
+
+此时 Worker 已存在，下一步马上添加 Secrets。
+
+> 在 Secrets 配好之前，不要把这个服务当作正式可用服务。
 
 ---
 
-# 18. 第十四步：测试后台登录
+## 第 10 步：添加 5 个 Cloudflare Secrets
 
-打开：
+依次执行：
 
-```text
-https://你的workers.dev/admin
+```powershell
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put SESSION_SECRET
+npx wrangler secret put DEVICE_PROOF_SECRET
+npx wrangler secret put TURNSTILE_SECRET
+npx wrangler secret put LICENSE_SIGNING_PRIVATE_KEY
 ```
 
-输入：
+### ADMIN_PASSWORD
 
-- ADMIN_PASSWORD
-- 完成 Turnstile
+这里输入你希望管理后台使用的密码。
 
-如果登录成功，会进入后台。
+不要把密码写入 README、`wrangler.jsonc` 或源码。
 
-后台包含：
+### SESSION_SECRET
+
+粘贴第 8 步生成的第一个随机值。
+
+### DEVICE_PROOF_SECRET
+
+粘贴第 8 步生成的第二个随机值。
+
+### TURNSTILE_SECRET
+
+粘贴 Cloudflare Turnstile 的 Secret Key。
+
+### LICENSE_SIGNING_PRIVATE_KEY
+
+需要粘贴 `cleanc-private.pem` 的完整内容，包括：
 
 ```text
-仪表盘
-授权管理
-设备管理
-操作日志
-设置
+-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
 ```
 
----
+Cloudflare Wrangler 支持多行 Secret。
 
-# 19. 第十五步：创建第一个授权码
+完成后建议再部署一次：
 
-进入：
-
-```text
-授权管理
-```
-
-你可以选择：
-
-## 永久
-
-```text
-permanent
-```
-
-永不过期，除非后台手工禁用。
-
-## 激活后 N 天
-
-例如：
-
-```text
-365
-```
-
-授权码未激活时不开始倒计时。
-
-第一次成功绑定设备以后开始计算 365 天。
-
-## 固定到期
-
-选择：
-
-```text
-固定到期
-```
-
-网页会显示日期时间输入框。
-
-例如：
-
-```text
-2027-12-31 23:59
-```
-
-## 设备数量
-
-例如：
-
-```text
-1
-```
-
-表示只允许同时绑定一台设备。
-
-## 批量生成
-
-例如：
-
-```text
-100
-```
-
-系统随机生成 100 个：
-
-```text
-CLC-XXXX-XXXX-XXXX-XXXX
-```
-
-随机字符排除了容易看错的：
-
-```text
-0 O 1 I L
+```powershell
+npm run deploy
 ```
 
 ---
 
-# 20. GitHub Actions 自动部署配置
+## 第 11 步：检查服务是否正常
 
-本仓库已经包含：
+浏览器打开：
 
 ```text
-.github/workflows/deploy.yml
+https://你的workers地址/api/v1/health
 ```
 
-只要配置 GitHub Actions Secret，之后 push 到 `main` 就会自动：
+应该看到类似：
 
-```text
-npm install
-→ npm run typecheck
-→ 检查 Cloudflare 配置
-→ D1 migrations apply --remote
-→ wrangler deploy
+```json
+{
+  "status": "ok",
+  "service": "cleanc-license-server",
+  "apiVersion": 2
+}
 ```
 
----
-
-# 21. 创建 Cloudflare API Token
-
-Cloudflare 控制台进入：
+再打开：
 
 ```text
-My Profile / Account
-→ API Tokens
-→ Create Token
+https://你的workers地址/api/v1/meta
 ```
 
-建议使用官方的：
+然后打开管理后台：
 
 ```text
-Edit Cloudflare Workers
+https://你的workers地址/admin
 ```
 
-模板，或创建 Custom Token。
+应该出现 CleanC 管理员登录页面和 Cloudflare Turnstile。
 
-至少需要满足当前项目执行 Worker 部署和 D1 Migration 所需要的权限。
-
-限制 Resource 到你自己的 Cloudflare Account，权限不要无限放大。
-
-生成 Token 后只显示一次，请复制保存。
-
-不要把 Token 写进 GitHub 文件。
-
----
-
-# 22. 找到 Cloudflare Account ID
-
-在 Cloudflare Dashboard 中进入对应 Account。
-
-可以在 Account Overview 或 Worker 页面找到：
+如果 Turnstile 不显示或提示域名错误，优先检查 Turnstile 的 Hostname Management 是否包含：
 
 ```text
-Account ID
-```
-
-格式类似：
-
-```text
-0123456789abcdef0123456789abcdef
+cleanc-license-server.你的workers子域.workers.dev
 ```
 
 ---
 
-# 23. 在 GitHub 添加 Actions Secrets
+# 四、绑定正式域名
 
-进入 GitHub 仓库：
+没有正式域名也完全可以先使用 workers.dev。
 
-```text
-wwz554/CleanC-License-Server
-```
-
-打开：
-
-```text
-Settings
-→ Secrets and variables
-→ Actions
-→ New repository secret
-```
-
-添加两个：
-
-## Secret 1
-
-名称：
-
-```text
-CLOUDFLARE_API_TOKEN
-```
-
-值：
-
-```text
-刚才 Cloudflare 创建的 API Token
-```
-
-## Secret 2
-
-名称：
-
-```text
-CLOUDFLARE_ACCOUNT_ID
-```
-
-值：
-
-```text
-你的 Cloudflare Account ID
-```
-
-保存。
-
----
-
-# 24. GitHub Actions 为什么会失败
-
-当前 Actions 加了预检查。
-
-如果没有配置完整，会直接给出明确错误。
-
-## 错误：TODO_D1_DATABASE_ID
-
-说明：
-
-```text
-wrangler.jsonc 还没填真实 D1 ID
-```
-
-## 错误：TODO_TURNSTILE_SITE_KEY
-
-说明：
-
-```text
-wrangler.jsonc 还没填 Turnstile Site Key
-```
-
-## 错误：CLOUDFLARE_API_TOKEN 未配置
-
-说明 GitHub：
-
-```text
-Settings
-→ Secrets and variables
-→ Actions
-```
-
-还没有添加 Token。
-
-## 错误：CLOUDFLARE_ACCOUNT_ID 未配置
-
-同理，添加 Account ID。
-
----
-
-# 25. 手工运行 GitHub Actions
-
-进入 GitHub：
-
-```text
-Actions
-→ Deploy Cloudflare Worker
-→ Run workflow
-```
-
-选择：
-
-```text
-main
-```
-
-点击：
-
-```text
-Run workflow
-```
-
-如果全部绿色，说明自动部署成功。
-
----
-
-# 26. 以后绑定自己的域名
-
-例如以后你有域名：
-
-```text
-example.com
-```
-
-希望使用：
+等你以后有域名，例如：
 
 ```text
 license.example.com
 ```
 
-Cloudflare 当前推荐使用 Worker Custom Domain。
+按下面操作。
 
-进入：
+## 第 1 步：域名必须在 Cloudflare 中
+
+Custom Domain 要求目标域名所在 Zone 已经添加到 Cloudflare。
+
+## 第 2 步：给 Worker 添加 Custom Domain
+
+Cloudflare Dashboard：
 
 ```text
 Workers & Pages
@@ -987,473 +525,43 @@ Workers & Pages
 → Custom Domain
 ```
 
-输入：
+填：
 
 ```text
 license.example.com
 ```
 
-Cloudflare 会自动处理对应 DNS 和证书。
+点击添加。
 
-注意：
+Cloudflare 会自动处理对应 DNS 记录和证书。
 
-- 域名必须属于你的 Cloudflare Zone；
-- 如果这个 hostname 已经有冲突的 CNAME，需要先处理冲突；
-- 不建议自己再另外建一个指向 workers.dev 的普通 CNAME 来替代 Worker Custom Domain。
+如果这个主机名原来已经存在冲突的 CNAME，需要先处理冲突记录。
 
----
-
-# 27. 自定义域名绑定后必须做的第二件事
+## 第 3 步：Turnstile 加入新域名
 
 进入：
 
 ```text
 Turnstile
-→ 你的 Widget
+→ CleanC License Admin
 → Settings
 → Hostname Management
 ```
 
-把：
+保留原 workers.dev 主机名，同时增加：
 
 ```text
 license.example.com
 ```
 
-也添加进去。
+不要删除 workers.dev，否则你以后通过 Bootstrap 地址进入管理后台时 Turnstile 会失效。
 
-最终 Turnstile Hostname 至少应该包含：
+## 第 4 步：测试新域名
 
-```text
-cleanc-license-server.xxxxx.workers.dev
-license.example.com
-```
-
-否则你从新域名访问 `/admin` 时，Turnstile 可能无法正常通过。
-
----
-
-# 28. 在 CleanC 后台切换正式授权域名
-
-等以下地址已经能正常访问：
+先打开：
 
 ```text
 https://license.example.com/api/v1/health
-```
-
-再进入后台：
-
-```text
-/admin
-→ 设置
-```
-
-填写：
-
-```text
-license.example.com
-```
-
-再次输入管理员密码并完成 Turnstile。
-
-点击：
-
-```text
-检测并保存
-```
-
-服务端会先请求：
-
-```text
-https://license.example.com/api/v1/health
-```
-
-只有检测正常才会写入：
-
-```text
-PRIMARY_BASE_URL
-```
-
-以后：
-
-```text
-/bootstrap/v1/config
-```
-
-会告诉客户端新的主授权地址。
-
----
-
-# 29. 为什么不要关闭 workers.dev
-
-建议保留：
-
-```text
-cleanc-license-server.xxxxx.workers.dev
-```
-
-因为它承担稳定 Bootstrap 的作用。
-
-正式业务 API 可以走：
-
-```text
-license.example.com
-```
-
-但客户端仍然可以把：
-
-```text
-https://cleanc-license-server.xxxxx.workers.dev/bootstrap/v1/config
-```
-
-作为永久发现地址。
-
-如果正式域名以后失效或更换，只需要后台改变 `PRIMARY_BASE_URL`，客户端不用发新版软件改域名。
-
----
-
-# 30. 恢复到 Bootstrap 地址
-
-后台：
-
-```text
-设置
-→ 恢复 Bootstrap 地址
-```
-
-需要：
-
-- 管理员密码
-- Turnstile
-
-恢复后会删除 D1 中的：
-
-```text
-PRIMARY_BASE_URL
-```
-
-然后主授权 API 回到：
-
-```text
-BOOTSTRAP_BASE_URL
-```
-
-因此一定要完成 README 第 17 步，把 `BOOTSTRAP_BASE_URL` 固定为你的 workers.dev 地址。
-
----
-
-# 31. Turnstile 安全说明
-
-服务端会调用 Cloudflare 官方：
-
-```text
-https://challenges.cloudflare.com/turnstile/v0/siteverify
-```
-
-进行服务端验证。
-
-不是只在网页前端显示一个验证码。
-
-服务端还会检查 Turnstile 返回的：
-
-```text
-hostname
-```
-
-必须与当前访问后台的 hostname 相同。
-
-因此：
-
-- workers.dev 要加入 Hostname Management；
-- 新自定义域名也要加入 Hostname Management。
-
-本项目只允许当：
-
-```text
-TURNSTILE_SECRET=DISABLED
-```
-
-时跳过验证。
-
-这个值只建议本机调试临时使用，正式环境不要设置为 DISABLED。
-
----
-
-# 32. 管理员 Session 安全
-
-登录成功后 Cookie 使用：
-
-```text
-HttpOnly
-Secure
-SameSite=Strict
-```
-
-Session 默认有效：
-
-```text
-8 小时
-```
-
-后台写操作额外要求 CSRF Token。
-
-登录还带基础 IP 频率限制。
-
----
-
-# 33. API 限流
-
-当前主要限制：
-
-```text
-管理员登录：每 IP 每分钟最多 5 次
-授权激活：每 IP 每分钟最多 10 次
-validate/refresh：每 IP 每分钟最多 60 次
-```
-
-这是应用层基础限制。
-
-如果正式用户量较大，后续还建议在 Cloudflare WAF / Rate Limiting Rules 再做一层边缘限流。
-
----
-
-# 34. D1 数据表说明
-
-## licenses
-
-保存：
-
-- 授权码
-- 状态
-- 授权类型
-- 有效天数
-- 到期时间
-- 激活时间
-- 最大设备数
-- 备注
-
-## devices
-
-保存：
-
-- 授权 ID
-- deviceId
-- 设备公钥
-- Windows 版本
-- App 版本
-- 首次出现时间
-- 最近在线时间
-- 是否解绑
-
-## audit_logs
-
-记录：
-
-- 管理员登录
-- 登录失败
-- 授权创建
-- 批量授权创建
-- 禁用 / 恢复
-- 设备绑定
-- 设备解绑
-- 设备重新绑定
-- 域名修改
-- 域名恢复
-
-## system_settings
-
-当前主要保存：
-
-```text
-PRIMARY_BASE_URL
-```
-
-## domain_history
-
-保存域名切换历史。
-
-## device_challenges
-
-保存设备 Challenge，默认 5 分钟失效，使用后不可重复验证。
-
-## rate_limits
-
-基础应用层限流计数。
-
----
-
-# 35. Windows 客户端正确接入方式
-
-建议客户端代码内只固定两个东西：
-
-## 1. Bootstrap URL
-
-```text
-https://你的-workers.dev/bootstrap/v1/config
-```
-
-## 2. 服务端 P-256 公钥
-
-即：
-
-```text
-cleanc-public.pem
-```
-
-客户端启动流程建议：
-
-```text
-1. 请求 Bootstrap
-2. 使用内置服务端公钥验证 Bootstrap signature
-3. 读取 canonicalBaseUrl
-4. 使用 canonicalBaseUrl 调用授权 API
-5. 服务端返回 Lease + signature
-6. 客户端再次使用内置服务端公钥验证 Lease signature
-7. 通过后才认为授权有效
-```
-
-不要仅仅依赖：
-
-```text
-HTTP 200
-```
-
-也不要只检查：
-
-```text
-success=true
-```
-
-客户端必须验证数字签名。
-
----
-
-# 36. 设备公钥建议
-
-每个 CleanC 客户端首次启动时生成自己的：
-
-```text
-P-256 私钥 / 公钥
-```
-
-设备私钥保存在本机安全位置。
-
-激活时只上传：
-
-```text
-devicePublicKey
-```
-
-不要把设备私钥上传服务器。
-
-服务器 Challenge：
-
-```text
-POST /api/v1/device/challenge
-```
-
-客户端使用本机私钥签名 nonce。
-
-然后调用：
-
-```text
-POST /api/v1/device/verify
-```
-
-服务端使用之前保存的设备公钥验证签名。
-
----
-
-# 37. 本地开发
-
-如果只是在本机测试，可以执行：
-
-```bash
-npm run db:local
-npm run dev
-```
-
-本地调试如果暂时没有 Turnstile，可在本地开发变量中临时使用：
-
-```text
-TURNSTILE_SECRET=DISABLED
-```
-
-但是正式 Cloudflare Worker **绝对不要**使用 DISABLED。
-
----
-
-# 38. 常见故障排查
-
-## 后台一直提示验证码错误
-
-检查：
-
-1. `TURNSTILE_SITE_KEY` 是否正确；
-2. Cloudflare Secret `TURNSTILE_SECRET` 是否正确；
-3. 当前 hostname 是否添加到 Turnstile Hostname Management；
-4. Site Key 和 Secret Key 是否来自同一个 Turnstile Widget。
-
-## GitHub Actions TypeScript Check 失败
-
-先本机执行：
-
-```bash
-npm install
-npm run typecheck
-```
-
-根据 TypeScript 报错处理。
-
-## D1 Migration 失败
-
-检查：
-
-```text
-wrangler.jsonc database_id
-CLOUDFLARE_API_TOKEN
-CLOUDFLARE_ACCOUNT_ID
-```
-
-再执行：
-
-```bash
-npx wrangler d1 migrations list cleanc-license --remote
-```
-
-查看 Migration 状态。
-
-## Worker 部署成功但后台 500
-
-通常检查四个 Secret：
-
-```text
-ADMIN_PASSWORD
-SESSION_SECRET
-TURNSTILE_SECRET
-LICENSE_SIGNING_PRIVATE_KEY
-```
-
-尤其是 `LICENSE_SIGNING_PRIVATE_KEY` 必须是 PKCS#8：
-
-```text
------BEGIN PRIVATE KEY-----
-```
-
-而不是：
-
-```text
------BEGIN EC PRIVATE KEY-----
-```
-
-如果你手里是 EC PRIVATE KEY，按第 11 步转换成 PKCS#8。
-
-## 保存新域名提示 DOMAIN_NOT_READY
-
-先直接浏览器测试：
-
-```text
-https://新域名/api/v1/health
 ```
 
 必须返回：
@@ -1461,231 +569,540 @@ https://新域名/api/v1/health
 ```json
 {
   "status": "ok",
-  "apiVersion": 1
+  "service": "cleanc-license-server",
+  "apiVersion": 2
 }
 ```
 
-如果打不开，说明 Custom Domain 还没真正绑定完成。
+## 第 5 步：在 CleanC 后台切换主授权地址
 
-## 固定到期授权创建失败
-
-固定到期时间必须：
-
-- 是有效时间；
-- 晚于当前时间。
-
-## DEVICE_NOT_BOUND
-
-说明客户端直接调用了 validate/refresh，但是设备没有完成 activate。
-
-先调用：
+打开：
 
 ```text
-/api/v1/license/activate
+https://license.example.com/admin
 ```
 
-## DEVICE_LIMIT_REACHED
-
-授权码已经绑定达到最大设备数。
-
-后台进入：
+登录后：
 
 ```text
-设备管理
+设置
+→ 域名与 API
 ```
 
-解绑旧设备，或新建允许更多设备的授权。
+填：
+
+```text
+license.example.com
+```
+
+再次输入管理员密码并完成 Turnstile，然后点击：
+
+```text
+检测并保存
+```
+
+系统会主动访问：
+
+```text
+https://license.example.com/api/v1/health
+```
+
+并确认它确实是 CleanC License Server，然后写入 D1：
+
+```text
+PRIMARY_BASE_URL
+```
+
+从此 Bootstrap 返回的 `canonicalBaseUrl` 会自动变成：
+
+```text
+https://license.example.com
+```
+
+但是固定 Bootstrap 地址仍然是：
+
+```text
+https://cleanc-license-server.xxx.workers.dev/bootstrap/v1/config
+```
+
+这样以后正式域名发生变化，Windows 客户端仍然有一个固定入口可以获得新地址。
 
 ---
 
-# 39. 正式上线前检查清单
+# 五、GitHub Actions 自动部署
 
-逐项确认：
-
-```text
-[ ] D1 已创建
-[ ] wrangler.jsonc 已填写真实 database_id
-[ ] Turnstile Widget 已创建
-[ ] wrangler.jsonc 已填写真实 Site Key
-[ ] ADMIN_PASSWORD 已保存为 Cloudflare Secret
-[ ] SESSION_SECRET 已保存为 Cloudflare Secret
-[ ] TURNSTILE_SECRET 已保存为 Cloudflare Secret
-[ ] LICENSE_SIGNING_PRIVATE_KEY 已保存为 Cloudflare Secret
-[ ] cleanc-public.pem 已保存到 Windows 客户端
-[ ] D1 Migration 已执行
-[ ] Worker 已首次部署
-[ ] /api/v1/health 正常
-[ ] /admin 能打开
-[ ] workers.dev 已加入 Turnstile Hostname Management
-[ ] BOOTSTRAP_BASE_URL 已固定为 workers.dev
-[ ] GitHub CLOUDFLARE_API_TOKEN 已配置
-[ ] GitHub CLOUDFLARE_ACCOUNT_ID 已配置
-[ ] GitHub Actions 能完整跑通
-[ ] 创建测试授权成功
-[ ] 测试设备 activate 成功
-[ ] validate 成功
-[ ] refresh 成功
-[ ] 禁用授权后客户端无法继续刷新授权
-[ ] 解绑设备后 DEVICE_NOT_BOUND 生效
-[ ] 原设备重新 activate 可以重新绑定
-[ ] Bootstrap signature 客户端验证成功
-[ ] Lease signature 客户端验证成功
-```
-
----
-
-# 40. 关于“防破解”
-
-任何运行在用户自己电脑上的软件都不能做到绝对不可破解。
-
-这个方案重点提高破解成本：
+仓库中已经包含：
 
 ```text
-服务器端决定授权状态
-+ 短期 Lease
-+ P-256 数字签名
-+ 设备绑定
-+ Challenge / Verify
-+ Bootstrap 动态服务地址
-+ 后台 Turnstile
-+ 管理端 CSRF
-+ 审计日志
+.github/workflows/deploy.yml
 ```
 
-Windows 客户端还应该同时做：
-
-- 不在本地明文保存“永久已授权=true”；
-- 每次使用缓存 Lease 都验证服务端签名；
-- Lease 到期必须重新从服务器刷新；
-- 关键功能不要只由一个布尔变量控制；
-- 对授权校验代码做合理混淆和完整性校验；
-- 服务端公钥可以公开，但必须防止客户端代码被简单替换公钥后绕过验证。
-
----
-
-# 41. 重要安全原则
-
-永远不要提交以下内容到 GitHub：
+每次修改以下内容并推送 `main`：
 
 ```text
-真实管理员密码
-SESSION_SECRET
-TURNSTILE_SECRET
-LICENSE_SIGNING_PRIVATE_KEY
-CLOUDFLARE_API_TOKEN
-设备私钥
+src/**
+migrations/**
+wrangler.jsonc
+package.json
+.github/workflows/deploy.yml
 ```
 
-可以提交：
+GitHub 会自动：
 
 ```text
-TURNSTILE_SITE_KEY
-D1 database_id
-CleanC 服务端公钥
-Workers.dev URL
-自定义 API 域名
+npm install
+→ TypeScript 检查
+→ 检查 Cloudflare 配置
+→ 应用 D1 migration
+→ 部署 Worker
 ```
 
----
+README 修改不会触发生产部署。
 
-# 42. 推荐最终架构
+## 创建 Cloudflare API Token
 
-```text
-CleanC Windows 客户端
-        │
-        │ 固定 Bootstrap URL
-        ▼
-xxxx.workers.dev/bootstrap/v1/config
-        │
-        │ P-256 签名返回 canonicalBaseUrl
-        ▼
-license.yourdomain.com
-        │
-        ├── /api/v1/license/activate
-        ├── /api/v1/license/validate
-        ├── /api/v1/license/refresh
-        ├── /api/v1/device/challenge
-        └── /api/v1/device/verify
-        │
-        ▼
-Cloudflare Worker
-        │
-        ├── Cloudflare D1
-        ├── Turnstile Siteverify
-        └── P-256 License Signing Private Key
-```
+Cloudflare Dashboard 中进入 API Token 页面。
 
-管理后台：
+创建给 GitHub Actions 使用的专用 Token。
 
-```text
-https://license.yourdomain.com/admin
-```
+最少需要允许它：
 
-或者保留：
+- 部署/编辑这个 Worker；
+- 执行 D1 migration；
+- 读取必要的账户信息。
 
-```text
-https://xxxx.workers.dev/admin
-```
+Cloudflare 当前权限界面可能显示为 Workers 的 `Editor` / `Workers Scripts Edit` 和 D1 的 `Editor/Edit`。只给这个 CI 所需的最小权限，不要直接使用 Global API Key。
 
----
-
-# 43. Cloudflare 官方参考文档
-
-Workers Custom Domains：
-
-```text
-https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
-```
-
-Workers GitHub Actions：
-
-```text
-https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/
-```
-
-D1 Wrangler Commands：
-
-```text
-https://developers.cloudflare.com/d1/wrangler-commands/
-```
-
-Turnstile Hostname Management：
-
-```text
-https://developers.cloudflare.com/turnstile/additional-configuration/hostname-management/
-```
-
-Turnstile Server-side Validation：
-
-```text
-https://developers.cloudflare.com/turnstile/get-started/server-side-validation/
-```
-
----
-
-# 44. 当前部署状态说明
-
-如果仓库还是刚初始化的状态，`wrangler.jsonc` 默认仍可能包含：
-
-```text
-TODO_D1_DATABASE_ID
-TODO_TURNSTILE_SITE_KEY
-```
-
-并且 GitHub Actions 还需要：
+Cloudflare 官方对 GitHub Actions 的要求是 CI 中提供：
 
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-这些值没配置以前，Actions **故意不会继续正式部署**。
+API Token 只显示一次，请妥善保存。
 
-这样可以避免：
+## 找 Account ID
 
-- 部署到错误 Cloudflare 账号；
-- Worker 绑定错误数据库；
-- Turnstile 无法登录；
-- 使用未配置的安全参数上线。
+Cloudflare Dashboard 中选择对应账户，在账户信息位置找到：
 
-把本 README 对应步骤全部完成后，再运行 GitHub Actions 即可。
+```text
+Account ID
+```
+
+## 在 GitHub 添加 Actions Secrets
+
+进入 GitHub 仓库：
+
+```text
+Settings
+→ Secrets and variables
+→ Actions
+→ New repository secret
+```
+
+创建：
+
+```text
+CLOUDFLARE_API_TOKEN
+```
+
+值填 Cloudflare API Token。
+
+再创建：
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+```
+
+值填 Cloudflare Account ID。
+
+**Cloudflare API Token 不要发到 Issue、README、代码或聊天截图里。**
+
+完成后进入：
+
+```text
+GitHub
+→ Actions
+→ Deploy Cloudflare Worker
+→ Run workflow
+```
+
+手动执行一次。
+
+如果 Actions 在：
+
+```text
+Verify Cloudflare configuration
+```
+
+失败，按照错误提示检查三个占位符是否都已经替换：
+
+```text
+TODO_D1_DATABASE_ID
+TODO_TURNSTILE_SITE_KEY
+TODO_BOOTSTRAP_BASE_URL
+```
+
+以及两个 GitHub Secret 是否已添加。
+
+---
+
+# 六、Windows 客户端正确授权流程
+
+## 首次激活
+
+客户端第一次启动时自己生成 P-256 密钥对。
+
+私钥只保存在本机安全存储中，**永远不上传服务器**。
+
+公钥使用 SPKI PEM 格式上传服务器。
+
+请求：
+
+```http
+POST /api/v1/license/activate
+Content-Type: application/json
+```
+
+示例：
+
+```json
+{
+  "licenseKey": "CLC-XXXX-XXXX-XXXX-XXXX",
+  "deviceId": "稳定的设备标识",
+  "devicePublicKey": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
+  "deviceName": "DESKTOP-ABC",
+  "windowsVersion": "Windows 11",
+  "appVersion": "1.0.0"
+}
+```
+
+成功后服务器返回短期 License Lease、`signedPayload` 和 `signature`。
+
+客户端必须用内置的 `cleanc-public.pem` 验证服务器签名后才信任 Lease。
+
+## 后续验证 / 续租
+
+不能直接调用 validate/refresh。
+
+正确顺序：
+
+```text
+1. POST /api/v1/device/challenge
+2. 客户端用本机 P-256 私钥签 nonce
+3. POST /api/v1/device/verify
+4. 服务端验证签名
+5. 服务端返回短期 deviceProof
+6. POST /api/v1/license/validate 或 /refresh
+7. 请求中携带 deviceProof
+8. 服务端返回新的签名 Lease
+```
+
+### challenge
+
+```json
+{
+  "licenseKey": "CLC-XXXX-XXXX-XXXX-XXXX",
+  "deviceId": "设备ID"
+}
+```
+
+### verify
+
+```json
+{
+  "licenseKey": "CLC-XXXX-XXXX-XXXX-XXXX",
+  "deviceId": "设备ID",
+  "nonce": "challenge返回的nonce",
+  "signature": "Base64URL格式的ECDSA签名"
+}
+```
+
+成功后返回：
+
+```json
+{
+  "success": true,
+  "verified": true,
+  "deviceProof": "...",
+  "proofExpiresInSeconds": 600
+}
+```
+
+### validate / refresh
+
+```json
+{
+  "licenseKey": "CLC-XXXX-XXXX-XXXX-XXXX",
+  "deviceId": "设备ID",
+  "deviceProof": "verify返回的deviceProof",
+  "appVersion": "1.0.0",
+  "windowsVersion": "Windows 11"
+}
+```
+
+如果复制了授权码和 deviceId，但是没有原设备私钥，就无法获得有效的 `deviceProof`。
+
+---
+
+# 七、Bootstrap 与服务器签名
+
+客户端应内置固定 Bootstrap：
+
+```text
+https://cleanc-license-server.xxx.workers.dev/bootstrap/v1/config
+```
+
+返回示例：
+
+```json
+{
+  "apiVersion": 2,
+  "canonicalBaseUrl": "https://license.example.com",
+  "issuedAt": "...",
+  "signedPayload": "...",
+  "signature": "..."
+}
+```
+
+推荐客户端验签方式：
+
+```text
+1. Base64URL 解码 signedPayload
+2. 使用内置服务器 P-256 公钥验证 signature
+3. 验签成功后解析 signedPayload 中的 JSON
+4. 只使用验签后的 canonicalBaseUrl
+```
+
+不要先相信外层的 `canonicalBaseUrl` 再验签。
+
+License Lease 也使用同样的 `signedPayload + signature` 方式。
+
+---
+
+# 八、管理后台功能
+
+访问：
+
+```text
+https://你的域名/admin
+```
+
+当前支持：
+
+- 管理员密码登录；
+- Cloudflare Turnstile；
+- HttpOnly / Secure / SameSite=Strict Session；
+- CSRF；
+- 登录限流；
+- 随机授权码；
+- 自定义授权码；
+- 批量生成；
+- 永久授权；
+- 激活后 N 天；
+- 固定到期时间；
+- 最大设备数；
+- 禁用 / 恢复授权；
+- 查看设备；
+- 解绑设备；
+- 操作日志；
+- 动态主授权域名；
+- 域名二次密码 + Turnstile 验证；
+- 退出登录。
+
+随机授权码格式：
+
+```text
+CLC-XXXX-XXXX-XXXX-XXXX
+```
+
+字符集主动排除了容易混淆的：
+
+```text
+0 O 1 I L
+```
+
+---
+
+# 九、常见报错
+
+## `TODO_D1_DATABASE_ID` 未替换
+
+说明 `wrangler.jsonc` 还没有真实 D1 ID。
+
+运行：
+
+```powershell
+npx wrangler d1 create cleanc-license
+```
+
+复制返回的 `database_id`。
+
+## `TODO_TURNSTILE_SITE_KEY` 未替换
+
+进入 Cloudflare Turnstile 创建 Widget，并把 Site Key 写入 `wrangler.jsonc`。
+
+## `TODO_BOOTSTRAP_BASE_URL` 未替换
+
+填写：
+
+```text
+https://cleanc-license-server.你的workers子域.workers.dev
+```
+
+## GitHub Actions 提示 `CLOUDFLARE_API_TOKEN` 为空
+
+GitHub：
+
+```text
+Settings → Secrets and variables → Actions
+```
+
+添加：
+
+```text
+CLOUDFLARE_API_TOKEN
+```
+
+## `CLOUDFLARE_ACCOUNT_ID` 为空
+
+同样在 GitHub Actions Secret 添加 Cloudflare Account ID。
+
+## 管理后台 Turnstile 一直失败
+
+检查：
+
+```text
+Turnstile → Widget → Settings → Hostname Management
+```
+
+当前浏览器正在访问的 hostname 必须存在于允许列表中。
+
+## 自定义域名提示 `DOMAIN_NOT_READY`
+
+先确认：
+
+```text
+https://你的正式域名/api/v1/health
+```
+
+可以直接访问，并且包含：
+
+```json
+"service": "cleanc-license-server"
+```
+
+## `DEVICE_KEY_MISMATCH`
+
+说明同一个 license + deviceId 已经绑定过另一把公钥。
+
+正常更换设备或重装导致密钥丢失时，应先在管理后台解绑旧设备，再重新激活。
+
+## `DEVICE_PROOF_REQUIRED`
+
+说明客户端没有先完成：
+
+```text
+challenge → sign → verify
+```
+
+或者 deviceProof 已超过 10 分钟。
+
+---
+
+# 十、安全注意事项
+
+永远不要提交这些内容：
+
+```text
+ADMIN_PASSWORD
+SESSION_SECRET
+DEVICE_PROOF_SECRET
+TURNSTILE_SECRET
+LICENSE_SIGNING_PRIVATE_KEY
+CLOUDFLARE_API_TOKEN
+```
+
+如果任何一个敏感值曾经出现在公开 GitHub commit 中，不是“删掉当前文件”就安全了，因为旧 commit 仍可能保留它。应该立即轮换对应 Secret。
+
+特别重要：
+
+- `cleanc-private.pem` 永远只属于服务器；
+- `cleanc-public.pem` 才能进入 Windows 客户端；
+- 设备私钥永远只属于具体 Windows 设备；
+- Worker 不应该返回服务器私钥；
+- Windows 客户端不要把“服务器返回的公钥”当信任根；
+- 正式使用建议保留 workers.dev Bootstrap，但业务授权请求走自己的 Custom Domain；
+- GitHub Actions 使用最小权限 API Token，不要使用 Global API Key。
+
+---
+
+# 十一、官方 Cloudflare 文档
+
+Cloudflare Workers：
+
+https://developers.cloudflare.com/workers/
+
+Wrangler 配置：
+
+https://developers.cloudflare.com/workers/wrangler/configuration/
+
+D1：
+
+https://developers.cloudflare.com/d1/
+
+D1 migrations：
+
+https://developers.cloudflare.com/d1/reference/migrations/
+
+Workers Secrets：
+
+https://developers.cloudflare.com/workers/configuration/secrets/
+
+Turnstile：
+
+https://developers.cloudflare.com/turnstile/
+
+Turnstile 服务端验证：
+
+https://developers.cloudflare.com/turnstile/get-started/server-side-validation/
+
+Workers Custom Domains：
+
+https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
+
+GitHub Actions：
+
+https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/
+
+---
+
+## 最终上线检查清单
+
+部署前逐项确认：
+
+- [ ] `npm run typecheck` 通过
+- [ ] D1 已创建
+- [ ] `TODO_D1_DATABASE_ID` 已替换
+- [ ] Turnstile 已创建
+- [ ] workers.dev hostname 已加入 Turnstile
+- [ ] `TODO_TURNSTILE_SITE_KEY` 已替换
+- [ ] `TODO_BOOTSTRAP_BASE_URL` 已替换
+- [ ] D1 migrations 已执行
+- [ ] `ADMIN_PASSWORD` 已配置为 Cloudflare Secret
+- [ ] `SESSION_SECRET` 已配置
+- [ ] `DEVICE_PROOF_SECRET` 已配置
+- [ ] `TURNSTILE_SECRET` 已配置
+- [ ] `LICENSE_SIGNING_PRIVATE_KEY` 已配置
+- [ ] `cleanc-public.pem` 已安全嵌入 Windows 客户端
+- [ ] `/api/v1/health` 正常
+- [ ] `/admin` 可登录
+- [ ] 可以生成授权码
+- [ ] 首次激活成功
+- [ ] challenge / verify 成功
+- [ ] validate / refresh 必须带 deviceProof
+- [ ] GitHub Actions 两个 Cloudflare Secret 已配置
+- [ ] 如使用正式域名，Custom Domain 和 Turnstile Hostname 都已配置
+
+完成以上项目后，CleanC License Server 才算真正进入可用状态。
