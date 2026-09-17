@@ -101,7 +101,44 @@ async function ensureSchema(env: Env): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_challenges_device ON device_challenges(device_id, created_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_challenges_expiry ON device_challenges(expires_at, used_at)`,
       `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
-      `CREATE INDEX IF NOT EXISTS idx_activation_locks_until ON activation_locks(locked_until)`
+      `CREATE INDEX IF NOT EXISTS idx_activation_locks_until ON activation_locks(locked_until)`,
+      `CREATE TRIGGER IF NOT EXISTS trg_duration_license_insert_guard
+        BEFORE INSERT ON licenses
+        WHEN NEW.license_type='duration' AND (NEW.activated_at IS NOT NULL OR NEW.expires_at IS NOT NULL)
+        BEGIN
+          SELECT RAISE(ABORT, 'DURATION_LICENSE_MUST_START_UNUSED');
+        END`,
+      `CREATE TRIGGER IF NOT EXISTS trg_activation_time_immutable
+        BEFORE UPDATE OF activated_at ON licenses
+        WHEN OLD.activated_at IS NOT NULL AND NEW.activated_at IS NOT OLD.activated_at
+        BEGIN
+          SELECT RAISE(ABORT, 'ACTIVATION_TIME_IMMUTABLE');
+        END`,
+      `CREATE TRIGGER IF NOT EXISTS trg_duration_expiry_immutable
+        BEFORE UPDATE OF expires_at ON licenses
+        WHEN OLD.license_type='duration'
+          AND OLD.activated_at IS NOT NULL
+          AND NEW.expires_at IS NOT OLD.expires_at
+        BEGIN
+          SELECT RAISE(ABORT, 'DURATION_EXPIRY_IMMUTABLE');
+        END`,
+      `CREATE TRIGGER IF NOT EXISTS trg_device_limit_insert
+        BEFORE INSERT ON devices
+        WHEN NEW.revoked_at IS NULL
+          AND (SELECT COUNT(*) FROM devices WHERE license_id=NEW.license_id AND revoked_at IS NULL) >=
+              (SELECT max_devices FROM licenses WHERE id=NEW.license_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'DEVICE_LIMIT_REACHED');
+        END`,
+      `CREATE TRIGGER IF NOT EXISTS trg_device_limit_rebind
+        BEFORE UPDATE OF revoked_at ON devices
+        WHEN OLD.revoked_at IS NOT NULL
+          AND NEW.revoked_at IS NULL
+          AND (SELECT COUNT(*) FROM devices WHERE license_id=NEW.license_id AND revoked_at IS NULL) >=
+              (SELECT max_devices FROM licenses WHERE id=NEW.license_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'DEVICE_LIMIT_REACHED');
+        END`
     ];
 
     for (const sql of statements) await env.DB.prepare(sql).run();
@@ -112,7 +149,6 @@ async function ensureSchema(env: Env): Promise<void> {
       try {
         await env.DB.prepare('ALTER TABLE device_challenges ADD COLUMN license_id TEXT').run();
       } catch (error) {
-        // Another isolate may have upgraded the table between PRAGMA and ALTER.
         const after = await env.DB.prepare('PRAGMA table_info(device_challenges)').all<{ name: string }>();
         if (!after.results.some(column => column.name === 'license_id')) throw error;
       }
