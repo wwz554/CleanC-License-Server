@@ -2,6 +2,7 @@ import { handlePagesRequest } from './pages';
 import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
 import { handlePasswordAdmin } from './admin-password';
+import { handleDomainSettings } from './domain-settings';
 import { prepareAuthenticatedAdminResponse } from './authenticated-admin';
 import type { Env } from './worker';
 
@@ -178,6 +179,10 @@ export async function handleAppRequest(request: Request, env: Env): Promise<Resp
   if (initError) return initError.clone();
 
   const path = new URL(request.url).pathname;
+
+  // 自定义域名保存/回滚优先走当前 Origin 验证，避免 Pages Function 自己 fetch 自己造成误判。
+  const domainSettingsResponse = await handleDomainSettings(request, runtimeEnv);
+  if (domainSettingsResponse) return domainSettingsResponse;
 
   // 先处理纯密码后台认证。未登录 /admin 会在这里返回登录页；
   // 已登录 /admin 返回 null，继续向下渲染真正后台。
