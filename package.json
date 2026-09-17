@@ -1,16 +1,14 @@
 {
   "name": "cleanc-license-server",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "npm run typecheck",
-    "typecheck": "tsc --noEmit",
-    "pages:dev": "wrangler pages dev public"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
-    "typescript": "latest",
-    "wrangler": "latest"
+    "@cloudflare/workers-types": "5.20260917.1",
+    "typescript": "7.0.2"
   }
 }
