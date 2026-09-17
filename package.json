@@ -1,6 +1,6 @@
 {
   "name": "cleanc-license-server",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,8 +9,8 @@
     "pages:dev": "wrangler pages dev public"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
-    "typescript": "latest",
-    "wrangler": "latest"
+    "@cloudflare/workers-types": "5.20260917.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.133.0"
   }
 }
