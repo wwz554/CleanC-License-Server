@@ -3,7 +3,7 @@ import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
 import type { Env } from './worker';
 
-const ROUTER_DB_GUARD_VERSION = '1';
+const ROUTER_DB_GUARD_VERSION = '2';
 let runtimeReady: Promise<Response | null> | null = null;
 
 function json(data: unknown, status = 200): Response {
@@ -45,6 +45,23 @@ async function applyRouterDbGuards(env: Env): Promise<void> {
       AND NEW.expires_at IS NOT OLD.expires_at
     BEGIN
       UPDATE licenses SET status='disabled' WHERE id=NEW.id;
+    END
+  `).run();
+
+  // 与生产热修保持一致：时长授权到期时间允许保持不变或延长，但绝不允许缩短/清空。
+  // 这样即使未来基础 schema 升级重新创建了旧 Trigger，最终生产入口仍会恢复正确规则。
+  await env.DB.prepare('DROP TRIGGER IF EXISTS trg_duration_expiry_monotonic').run();
+  await env.DB.prepare(`
+    CREATE TRIGGER trg_duration_expiry_monotonic
+    BEFORE UPDATE OF expires_at ON licenses
+    WHEN OLD.license_type='duration'
+      AND OLD.activated_at IS NOT NULL
+      AND (
+        NEW.expires_at IS NULL OR
+        (OLD.expires_at IS NOT NULL AND NEW.expires_at < OLD.expires_at)
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'DURATION_EXPIRY_CAN_ONLY_BE_EXTENDED');
     END
   `).run();
 
