@@ -44,6 +44,10 @@ jobs:
             echo '::error::wrangler.jsonc 里的 TODO_TURNSTILE_SITE_KEY 还没有替换为真实 Turnstile Site Key。'
             exit 1
           fi
+          if grep -q 'TODO_BOOTSTRAP_BASE_URL' wrangler.jsonc; then
+            echo '::error::wrangler.jsonc 里的 TODO_BOOTSTRAP_BASE_URL 还没有替换为固定 workers.dev 地址。'
+            exit 1
+          fi
           if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
             echo '::error::GitHub Actions Secret CLOUDFLARE_API_TOKEN 未配置。'
             exit 1
