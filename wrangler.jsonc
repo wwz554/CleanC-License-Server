@@ -3,6 +3,7 @@
   "name": "cleanc-license-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-17",
+  "workers_dev": true,
   "observability": { "enabled": true },
   "d1_databases": [
     {
@@ -16,6 +17,6 @@
     "APP_NAME": "CleanC",
     "TURNSTILE_SITE_KEY": "TODO_TURNSTILE_SITE_KEY",
     "LEASE_HOURS": "72",
-    "BOOTSTRAP_BASE_URL": ""
+    "BOOTSTRAP_BASE_URL": "TODO_BOOTSTRAP_BASE_URL"
   }
 }
