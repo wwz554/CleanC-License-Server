@@ -3,6 +3,7 @@ import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
 import type { Env } from './worker';
 
+const ROUTER_DB_GUARD_VERSION = '1';
 let runtimeReady: Promise<Response | null> | null = null;
 
 function json(data: unknown, status = 200): Response {
@@ -28,6 +29,57 @@ async function consumeRateLimit(env: Env, key: string, max: number, seconds: num
   return !!row && row.count <= max;
 }
 
+async function applyRouterDbGuards(env: Env): Promise<void> {
+  const current = await env.DB.prepare(
+    "SELECT setting_value FROM system_settings WHERE setting_key='ROUTER_DB_GUARD_VERSION'",
+  ).first<{ setting_value: string }>();
+  if (current?.setting_value === ROUTER_DB_GUARD_VERSION) return;
+
+  // 续期只能延长时间。若管理员之前主动禁用了授权，续期不能在任何瞬间把它重新启用。
+  await env.DB.prepare('DROP TRIGGER IF EXISTS trg_preserve_disabled_on_renew').run();
+  await env.DB.prepare(`
+    CREATE TRIGGER trg_preserve_disabled_on_renew
+    AFTER UPDATE OF expires_at,status ON licenses
+    WHEN OLD.status='disabled'
+      AND NEW.status='active'
+      AND NEW.expires_at IS NOT OLD.expires_at
+    BEGIN
+      UPDATE licenses SET status='disabled' WHERE id=NEW.id;
+    END
+  `).run();
+
+  // 未来即使增加编辑授权的接口，也不允许把时长授权改成非法天数。
+  await env.DB.prepare('DROP TRIGGER IF EXISTS trg_duration_days_update_guard').run();
+  await env.DB.prepare(`
+    CREATE TRIGGER trg_duration_days_update_guard
+    BEFORE UPDATE OF duration_days,license_type ON licenses
+    WHEN NEW.license_type='duration'
+      AND (NEW.duration_days IS NULL OR NEW.duration_days < 1 OR NEW.duration_days > 36500)
+    BEGIN
+      SELECT RAISE(ABORT, 'INVALID_DURATION_DAYS');
+    END
+  `).run();
+
+  // 固定到期授权始终必须有明确到期时间。
+  await env.DB.prepare('DROP TRIGGER IF EXISTS trg_fixed_expiry_update_guard').run();
+  await env.DB.prepare(`
+    CREATE TRIGGER trg_fixed_expiry_update_guard
+    BEFORE UPDATE OF expires_at,license_type ON licenses
+    WHEN NEW.license_type='fixed' AND NEW.expires_at IS NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'FIXED_LICENSE_REQUIRES_EXPIRY');
+    END
+  `).run();
+
+  await env.DB.prepare(`
+    INSERT INTO system_settings(setting_key,setting_value,updated_at)
+    VALUES('ROUTER_DB_GUARD_VERSION',?,?)
+    ON CONFLICT(setting_key) DO UPDATE SET
+      setting_value=excluded.setting_value,
+      updated_at=excluded.updated_at
+  `).bind(ROUTER_DB_GUARD_VERSION, new Date().toISOString()).run();
+}
+
 async function ensureRuntime(request: Request, env: Env): Promise<Response | null> {
   if (runtimeReady) return runtimeReady;
 
@@ -41,6 +93,8 @@ async function ensureRuntime(request: Request, env: Env): Promise<Response | nul
     // 再让生产网关执行数据库热修复和协议初始化。
     const production = await handleProductionRequest(healthRequest, env);
     if (!production.ok) return production;
+
+    await applyRouterDbGuards(env);
     return null;
   })().catch(error => {
     console.error('Runtime initialization failed', error);
@@ -56,7 +110,7 @@ async function ensureRuntime(request: Request, env: Env): Promise<Response | nul
   return result;
 }
 
-async function routeRenewal(request: Request, env: Env, path: string): Promise<Response> {
+async function routeRenewal(request: Request, env: Env): Promise<Response> {
   let body: Record<string, unknown> | null = null;
   try {
     body = await request.clone().json() as Record<string, unknown>;
@@ -91,8 +145,7 @@ async function routeAdminRenew(request: Request, env: Env, licenseId: string): P
 
   const response = await handleProductionRequest(request, env);
 
-  // “续期”只延长时间，不改变管理员主动禁用的状态。
-  // 原实现会把 disabled 自动改回 active，这会违背管理员意图。
+  // 数据库触发器会原子保持 disabled；这里再做一层应用层保险。
   if (response.ok && before?.status === 'disabled') {
     await env.DB.prepare(
       "UPDATE licenses SET status='disabled' WHERE id=? AND status='active'",
@@ -112,7 +165,7 @@ export async function handleAppRequest(request: Request, env: Env): Promise<Resp
   }
 
   if ((path === '/api/v1/device/challenge' || path === '/api/v1/license/refresh') && request.method === 'POST') {
-    return routeRenewal(request, env, path);
+    return routeRenewal(request, env);
   }
 
   const renew = path.match(/^\/admin\/api\/licenses\/([^/]+)\/renew$/);
