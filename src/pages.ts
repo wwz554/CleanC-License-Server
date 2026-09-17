@@ -2,6 +2,7 @@ import server from './server';
 import type { Env } from './types';
 
 const SCHEMA_VERSION = '3';
+const CLEANUP_INTERVAL_MS = 24 * 3_600_000;
 let schemaReady: Promise<void> | null = null;
 
 async function ensureSchema(env: Env): Promise<void> {
@@ -15,10 +16,11 @@ async function ensureSchema(env: Env): Promise<void> {
       updated_at TEXT NOT NULL
     )`).run();
 
-    const current = await env.DB.prepare("SELECT meta_value FROM schema_meta WHERE meta_key='schema_version'")
-      .first<{ meta_value: string }>();
+    const metaRows = await env.DB.prepare("SELECT meta_key,meta_value FROM schema_meta WHERE meta_key IN ('schema_version','last_cleanup_at')")
+      .all<{ meta_key: string; meta_value: string }>();
+    const meta = new Map(metaRows.results.map(row => [row.meta_key, row.meta_value]));
 
-    if (current?.meta_value !== SCHEMA_VERSION) {
+    if (meta.get('schema_version') !== SCHEMA_VERSION) {
       await env.DB.batch([
         env.DB.prepare(`CREATE TABLE IF NOT EXISTS licenses (
           id TEXT PRIMARY KEY,
@@ -102,14 +104,20 @@ async function ensureSchema(env: Env): Promise<void> {
     }
 
     const now = Date.now();
-    const auditCutoff = new Date(now - 90 * 86_400_000).toISOString();
-    const challengeCutoff = new Date(now - 24 * 3_600_000).toISOString();
-    const rateCutoff = Math.floor(now / 1000) - 2 * 86_400;
-    await env.DB.batch([
-      env.DB.prepare('DELETE FROM audit_logs WHERE created_at<?').bind(auditCutoff),
-      env.DB.prepare('DELETE FROM device_challenges WHERE expires_at<? OR (used_at IS NOT NULL AND used_at<?)').bind(challengeCutoff, challengeCutoff),
-      env.DB.prepare('DELETE FROM rate_limits WHERE window_start<?').bind(rateCutoff),
-    ]);
+    const lastCleanup = Date.parse(meta.get('last_cleanup_at') || '');
+    if (!Number.isFinite(lastCleanup) || now - lastCleanup >= CLEANUP_INTERVAL_MS) {
+      const cleanupAt = new Date(now).toISOString();
+      const auditCutoff = new Date(now - 90 * 86_400_000).toISOString();
+      const challengeCutoff = new Date(now - 24 * 3_600_000).toISOString();
+      const rateCutoff = Math.floor(now / 1000) - 2 * 86_400;
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM audit_logs WHERE created_at<?').bind(auditCutoff),
+        env.DB.prepare('DELETE FROM device_challenges WHERE expires_at<? OR (used_at IS NOT NULL AND used_at<?)').bind(challengeCutoff, challengeCutoff),
+        env.DB.prepare('DELETE FROM rate_limits WHERE window_start<?').bind(rateCutoff),
+        env.DB.prepare(`INSERT INTO schema_meta(meta_key,meta_value,updated_at) VALUES('last_cleanup_at',?,?)
+          ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value,updated_at=excluded.updated_at`).bind(cleanupAt, cleanupAt),
+      ]);
+    }
   })().catch(error => {
     schemaReady = null;
     throw error;
