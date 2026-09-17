@@ -1,19 +1,28 @@
 # CleanC License Server
 
-CleanC License Server 是一个基于 **Cloudflare Pages + Pages Functions + D1 + Turnstile** 的授权服务。
+CleanC License Server 是 CleanC Windows 客户端的生产授权服务，基于：
 
-当前仓库已经改成 **Cloudflare Pages 直接连接 GitHub 自动部署** 的模式：
+- Cloudflare Pages
+- Pages Functions
+- Cloudflare D1
+- Cloudflare Turnstile
+- P-256 / ECDSA 设备身份与服务器签名
+- GitHub 直连 Cloudflare Pages 自动部署
 
-- 不再使用 GitHub Actions 部署；
-- 不需要在仓库里填写 Cloudflare API Token；
-- 不需要在仓库里填写 D1 `database_id`；
-- 不需要手动执行 SQL migration；
-- 只需要在 Cloudflare Pages 项目里绑定一个变量名为 `DB` 的 D1 数据库；
-- 部署后的第一次请求会自动检查并创建所有数据表和索引；
-- 后续再次部署不会清空原数据库，全部使用 `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`；
-- 老版本数据库如果缺少 `device_challenges.license_id` 字段，代码也会自动补齐。
+当前生产授权规则已经固定为：
 
-> 本仓库是公开仓库。管理员密码、Turnstile Secret、设备证明密钥、服务器签名私钥等敏感内容绝对不要提交到 GitHub。
+1. **一个授权码同一时间只能绑定 1 台设备。**
+2. **一台设备同一时间只能绑定 1 个有效授权。**
+3. 同一个授权码并发激活时，**第一个成功拿到 D1 激活锁的请求成功**，其他请求失败。
+4. 管理员后台手动“解绑设备”后，该授权码可以重新绑定另一台设备。
+5. “激活后 N 天”授权从**第一次成功激活**开始计时；创建后一直没人使用，不会提前消耗天数。
+6. 72 小时 Lease 只是客户端离线租约周期，不改变 7 天、30 天等授权总有效期。
+7. Lease 有效期间客户端本地验证服务器签名，不需要每次启动都访问服务器。
+8. Lease 快到期时，只需要 **challenge + refresh 两次请求**。
+9. 授权总有效期到期后，客户端立即停止使用；设备联网后用设备私钥完成一次到期上报，服务器释放旧绑定。
+10. 旧绑定释放后，该设备可以输入新的授权码；如果管理员已经给原授权码续期，也可以重新使用原授权码。
+
+> 本仓库是公开仓库。管理员密码、Turnstile Secret、服务器签名私钥等敏感值绝对不要提交到 GitHub。
 
 ---
 
@@ -22,214 +31,127 @@ CleanC License Server 是一个基于 **Cloudflare Pages + Pages Functions + D1 
 ```text
 CleanC-License-Server/
 ├─ functions/
-│  ├─ index.ts            # Pages 根路由 /
-│  └─ [[path]].ts         # Pages 所有其他路由
+│  ├─ index.ts
+│  └─ [[path]].ts
 ├─ public/
-│  ├─ index.html          # Pages 静态输出目录占位文件
-│  └─ _routes.json        # 所有请求交给 Pages Functions
+│  ├─ index.html
+│  └─ _routes.json
 ├─ src/
-│  ├─ admin.ts            # 管理后台页面
-│  ├─ worker.ts           # 授权后端核心逻辑
-│  ├─ pages.ts            # Pages 适配 + D1 自动建表
+│  ├─ admin.ts
+│  ├─ worker.ts
+│  ├─ pages.ts
 │  └─ webcrypto-compat.d.ts
+├─ .github/workflows/ci.yml
+├─ .env.example
 ├─ package.json
 ├─ tsconfig.json
 └─ README.md
 ```
 
+`src/pages.ts` 是当前生产 Pages 适配层，负责：
+
+- D1 自动建表和自动升级；
+- 单授权单设备约束；
+- 单设备单授权约束；
+- 并发激活锁；
+- 72 小时 Lease 两步续期；
+- 到期设备自动释放；
+- duration 授权续期；
+- 生产配置检查。
+
+`src/worker.ts` 保留基础授权和管理后台核心逻辑。
+
 ---
 
-# 二、现在的部署方式
+# 二、部署方式
 
-最终流程是：
+部署方式是：
 
 ```text
-GitHub main 分支
-       │
-       │ push
-       ▼
+GitHub main
+   ↓ push
 Cloudflare Pages Git Integration
-       │
-       ├─ npm install
-       ├─ npm run build
-       ├─ TypeScript 检查
-       └─ 发布 Pages Functions
-               │
-               ▼
-            D1 binding: DB
-               │
-               └─ 首次请求自动建表
+   ↓
+npm install
+   ↓
+npm run build
+   ↓
+Cloudflare Pages 自动发布
 ```
 
-以后修改 GitHub `main` 分支，Cloudflare Pages 会自动重新构建和发布。
+`.github/workflows/ci.yml` **不负责部署 Cloudflare**。
 
-Cloudflare 官方的 Pages Git Integration 支持 GitHub 仓库自动部署，每次向生产分支推送代码都会触发新部署。
+它只做代码检查：
 
----
+```text
+npm install
+npm run build
+TypeScript check
+```
 
-# 三、第一次部署前需要准备什么
+所以：
 
-你只需要准备：
-
-1. Cloudflare 账号；
-2. GitHub 账号；
-3. GitHub 仓库：`wwz554/CleanC-License-Server`；
-4. 一个 Cloudflare D1 数据库；
-5. 一个 Cloudflare Turnstile Widget；
-6. 一组 P-256 服务器签名密钥。
-
-不需要：
-
-- GitHub Actions Secret；
-- `CLOUDFLARE_API_TOKEN`；
-- `CLOUDFLARE_ACCOUNT_ID`；
-- 手动执行 D1 SQL；
-- 手动运行 Wrangler deploy。
+- 不需要 GitHub Cloudflare API Token；
+- 不需要 GitHub Actions 部署；
+- Cloudflare Pages 直接拉取 GitHub；
+- GitHub CI 只负责阻止明显的 TypeScript 错误进入生产。
 
 ---
 
-# 四、Cloudflare Pages 连接 GitHub
+# 三、Cloudflare Pages 连接 GitHub
 
-## 第 1 步：进入 Workers & Pages
-
-登录 Cloudflare 控制台。
-
-进入：
+Cloudflare 控制台进入：
 
 ```text
 Workers & Pages
+→ Create application
+→ Pages
+→ Connect to Git / Import existing Git repository
 ```
 
 选择：
-
-```text
-Create application
-→ Pages
-→ Connect to Git / Import an existing Git repository
-```
-
-如果 Cloudflare 第一次连接 GitHub，会要求安装 Cloudflare GitHub App。
-
-授权时确保允许它访问：
 
 ```text
 wwz554/CleanC-License-Server
 ```
 
-然后选择这个仓库。
+设置：
 
----
-
-## 第 2 步：设置生产分支
-
-Production branch 选择：
-
-```text
-main
-```
-
----
-
-## 第 3 步：设置构建参数
-
-Framework preset：
-
-```text
-None
-```
-
-Build command：
-
-```text
-npm run build
-```
-
-Build output directory：
-
-```text
-public
-```
-
-Root directory：
-
-```text
-留空
-```
-
-也就是：
-
-| 项目 | 填写内容 |
+| 项目 | 内容 |
 |---|---|
-| Framework preset | None |
-| Production branch | main |
+| Production branch | `main` |
+| Framework preset | `None` |
 | Build command | `npm run build` |
 | Build output directory | `public` |
 | Root directory | 留空 |
 
-`npm run build` 实际执行 TypeScript 检查。如果代码存在 TypeScript 错误，Cloudflare 会直接判定本次构建失败，不会把错误版本发布出去。
-
----
-
-## 第 4 步：第一次部署
-
-点击：
+然后点击：
 
 ```text
 Save and Deploy
 ```
 
-第一次部署此时即使成功，网站接口也可能返回：
-
-```json
-{
-  "success": false,
-  "code": "D1_BINDING_MISSING"
-}
-```
-
-这是正常的，因为这时候还没有绑定 D1。
-
-不要在 GitHub 代码里填写数据库 ID。
+第一次没有绑定 D1 时接口返回 `D1_BINDING_MISSING` 属于正常现象。
 
 ---
 
-# 五、创建 D1 数据库
+# 四、创建并绑定 D1
 
-在 Cloudflare 控制台进入：
+Cloudflare 控制台：
 
 ```text
 Storage & Databases
 → D1 SQL Database
+→ Create database
 ```
 
-选择：
-
-```text
-Create database
-```
-
-数据库名称建议：
+建议数据库名：
 
 ```text
 cleanc-license
 ```
 
-创建完成即可。
-
-这里 **不需要手工建表，不需要打开 Console 执行 SQL，也不需要复制 database_id 到 GitHub**。
-
----
-
-# 六、把 D1 绑定到 Pages
-
-回到：
-
-```text
-Workers & Pages
-→ 你的 CleanC Pages 项目
-```
-
-进入：
+然后回到 Pages 项目：
 
 ```text
 Settings
@@ -238,54 +160,19 @@ Settings
 → D1 database
 ```
 
-填写：
-
-Variable name：
+变量名必须填写：
 
 ```text
 DB
 ```
 
-D1 database：
+选择刚创建的数据库。
 
-```text
-选择刚才创建的 cleanc-license
-```
+绑定后重新部署一次 Production。
 
-注意：变量名必须严格写成：
+## 不需要手工建表
 
-```text
-DB
-```
-
-不能写成：
-
-```text
-D1
-DATABASE
-CLEANC_DB
-DB1
-```
-
-因为代码访问的是：
-
-```ts
-env.DB
-```
-
-Cloudflare 官方 Pages 文档也要求 Pages Functions 通过绑定变量名从 `context.env` 访问 D1。
-
----
-
-# 七、D1 自动建表是怎么工作的
-
-Pages Functions 每次新实例第一次收到请求时会进入：
-
-```text
-src/pages.ts
-```
-
-代码会自动检查并创建：
+第一次正常请求到达 Pages Functions 后，代码会自动创建/升级：
 
 ```text
 licenses
@@ -295,284 +182,171 @@ system_settings
 domain_history
 device_challenges
 rate_limits
+activation_locks
 ```
 
-以及相关索引。
+同时自动创建索引和数据库 Trigger。
 
-核心原则是：
-
-```sql
-CREATE TABLE IF NOT EXISTS ...
-CREATE INDEX IF NOT EXISTS ...
-```
-
-因此：
-
-- 新数据库：自动创建；
-- 已经存在的数据库：不会删除；
-- 已有授权码：不会丢失；
-- 已有设备记录：不会清空；
-- 再部署：不会重置数据库。
-
-旧数据库如果 `device_challenges` 没有 `license_id`，代码会执行兼容升级：
-
-```sql
-ALTER TABLE device_challenges ADD COLUMN license_id TEXT
-```
-
-然后补建索引。
-
-所以以后一般不需要再手动跑 migration。
+代码使用 `CREATE TABLE IF NOT EXISTS`、`CREATE INDEX IF NOT EXISTS` 和版本号升级，因此重新部署不会清空已有数据。
 
 ---
 
-# 八、绑定 D1 后必须重新部署
+# 五、生产数据库保护规则
 
-Cloudflare Pages 的 Binding 修改后，需要重新部署项目才能让当前部署使用新绑定。
+数据库层不是只相信前端和 TypeScript，而是额外锁死关键授权规则。
 
-进入：
-
-```text
-Deployments
-```
-
-找到最新 Production deployment。
-
-选择：
+当前 D1 会保证：
 
 ```text
-Retry deployment
+一个 license_id 只能有 1 条 revoked_at IS NULL 的设备记录
+一个 device_id 只能有 1 条 revoked_at IS NULL 的授权记录
+max_devices 永远只能是 1
 ```
 
-或者直接在 GitHub 提交一个新 commit，也会自动重新部署。
-
-部署完成后访问：
-
-```text
-https://你的项目.pages.dev/api/v1/health
-```
-
-正常应返回类似：
+因此即使以后前端被篡改，提交：
 
 ```json
-{
-  "status": "ok",
-  "service": "cleanc-license-server",
-  "apiVersion": 2
-}
+{"maxDevices":1000}
 ```
 
-第一次请求同时会自动建立 D1 表结构。
+服务端也会强制归一化为 1，数据库也会拒绝大于 1 的配置。
+
+如果从旧测试数据库升级，发现历史上同一个授权码或同一个设备存在多条活动绑定，升级逻辑会保留最早的有效绑定，并自动把其他记录标记为已解绑，然后再创建唯一索引。
 
 ---
 
-# 九、创建 Turnstile
+# 六、授权类型
 
-Cloudflare 控制台进入：
+## 1. 永久授权
+
+```text
+license_type = permanent
+expires_at = NULL
+```
+
+不会因为时间自动失效，但仍受管理员禁用、设备解绑和 72 小时 Lease 规则控制。
+
+## 2. 激活后 N 天
+
+例如创建 7 天授权：
+
+```text
+license_type = duration
+duration_days = 7
+activated_at = NULL
+expires_at = NULL
+```
+
+创建日期不参与计时。
+
+例如 2026-09-17 创建，直到 2027-01-01 才第一次使用：
+
+```text
+2026-09-17 创建
+↓
+一直未激活
+↓
+仍然完整保留 7 天
+↓
+2027-01-01 10:00 首次成功激活
+↓
+activated_at = 2027-01-01 10:00
+expires_at   = 2027-01-08 10:00
+```
+
+之后：
+
+- 重启软件不会重置时间；
+- 72 小时续租不会重置时间；
+- 第二次激活不会重新计算 7 天；
+- 管理员禁用再恢复不会暂停倒计时；
+- 管理员解绑不会把授权恢复成“未使用”。
+
+## 3. 固定到期时间
+
+创建时直接指定绝对到期时间。
+
+无论什么时候第一次使用，到这个时间都会失效。
+
+---
+
+# 七、创建 Turnstile
+
+Cloudflare：
 
 ```text
 Turnstile
+→ Add widget
 ```
 
-选择：
-
-```text
-Add widget
-```
-
-Widget name 可以填写：
-
-```text
-CleanC License Admin
-```
-
-Hostname Management 中先加入你的 Pages 域名，例如：
+Hostname Management 先加入 Pages 域名，例如：
 
 ```text
 cleanc-license-server.pages.dev
 ```
 
-以后绑定正式域名后，再把正式域名也加入 Turnstile Hostname Management。
+绑定正式域名后，再把正式域名加入 Hostname Management。
 
-创建完成后会得到两个值：
+保存：
 
-```text
-Site Key
-Secret Key
-```
+- Site Key
+- Secret Key
 
-其中：
-
-- Site Key 可以作为普通变量；
-- Secret Key 必须作为加密 Secret。
+Site Key 是公开值。
+Secret Key 必须作为加密 Secret。
 
 ---
 
-# 十、配置 Pages Variables and Secrets
+# 八、Pages Variables and Secrets
 
 进入：
 
 ```text
 Workers & Pages
-→ CleanC Pages 项目
+→ CleanC 项目
 → Settings
 → Variables and Secrets
-→ Add
 ```
-
-Cloudflare Pages 官方文档中，运行时环境变量和 Secret 都可以在这里配置。
 
 ## 普通变量
 
-### APP_NAME
-
 ```text
-APP_NAME
+APP_NAME=CleanC
+TURNSTILE_SITE_KEY=你的 Turnstile Site Key
+LEASE_HOURS=72
+BOOTSTRAP_BASE_URL=https://你的项目.pages.dev
 ```
 
-值：
+`BOOTSTRAP_BASE_URL` 建议永远保留 Pages 自带地址，作为客户端固定入口。
 
-```text
-CleanC
-```
+## 加密 Secret
 
-### TURNSTILE_SITE_KEY
-
-```text
-TURNSTILE_SITE_KEY
-```
-
-值填 Turnstile 的 Site Key。
-
-不要加密也可以，因为 Site Key 本身是前端公开值。
-
-### LEASE_HOURS
-
-```text
-LEASE_HOURS
-```
-
-建议：
-
-```text
-72
-```
-
-代表授权租约默认 72 小时。
-
-### BOOTSTRAP_BASE_URL
-
-这个非常重要。
-
-填写 Pages 自带的固定地址，例如：
-
-```text
-https://cleanc-license-server.pages.dev
-```
-
-不要在最后加 `/`。
-
-这个地址作为 Windows 客户端的永久 Bootstrap 入口。
-
-以后即使正式 API 域名变了，客户端仍然可以访问 Pages 地址获得最新主授权地址。
-
----
-
-# 十一、需要设置的加密 Secret
-
-以下变量添加时，请选择：
-
-```text
-Encrypt
-```
-
-不要作为普通明文变量。
-
-## 1. ADMIN_PASSWORD
-
-变量名：
+必须配置：
 
 ```text
 ADMIN_PASSWORD
-```
-
-值填写你自己的后台管理员密码。
-
-不要写进 GitHub。
-
----
-
-## 2. SESSION_SECRET
-
-变量名：
-
-```text
 SESSION_SECRET
-```
-
-建议生成至少 48 字节随机值。
-
-如果电脑有 OpenSSL：
-
-```bash
-openssl rand -base64 48
-```
-
-把输出完整复制进去。
-
----
-
-## 3. DEVICE_PROOF_SECRET
-
-变量名：
-
-```text
-DEVICE_PROOF_SECRET
-```
-
-再单独生成一个不同的随机值：
-
-```bash
-openssl rand -base64 48
-```
-
-不要和 SESSION_SECRET 使用同一个值。
-
----
-
-## 4. TURNSTILE_SECRET
-
-变量名：
-
-```text
 TURNSTILE_SECRET
-```
-
-值填写 Turnstile 的 Secret Key。
-
-选择 Encrypt。
-
----
-
-## 5. LICENSE_SIGNING_PRIVATE_KEY
-
-这是服务器签发 Bootstrap 和 License Lease 的私钥。
-
-变量名：
-
-```text
 LICENSE_SIGNING_PRIVATE_KEY
 ```
 
-必须选择 Encrypt。
+### SESSION_SECRET
 
-下面生成它。
+建议：
+
+```bash
+openssl rand -base64 48
+```
+
+### DEVICE_PROOF_SECRET
+
+**当前生产协议已经不再需要。**
+
+旧版三步续租使用过 `DEVICE_PROOF_SECRET`，现在设备签名直接在 `refresh` 中验证，所以不再需要单独的 Device Proof。
 
 ---
 
-# 十二、生成服务器 P-256 签名密钥
-
-在 Git Bash / Linux / macOS 终端运行：
+# 九、生成服务器 P-256 签名密钥
 
 ```bash
 openssl ecparam -name prime256v1 -genkey -noout -out ec-private-sec1.pem
@@ -580,90 +354,514 @@ openssl pkcs8 -topk8 -nocrypt -in ec-private-sec1.pem -out cleanc-private.pem
 openssl pkey -in cleanc-private.pem -pubout -out cleanc-public.pem
 ```
 
-最终得到：
+得到：
 
 ```text
 cleanc-private.pem
 cleanc-public.pem
 ```
 
-## cleanc-private.pem
+## 私钥
 
-内容类似：
-
-```text
------BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-```
-
-完整复制到 Cloudflare Secret：
+完整放入 Cloudflare 加密 Secret：
 
 ```text
 LICENSE_SIGNING_PRIVATE_KEY
 ```
 
-这个文件绝对不能上传 GitHub。
+绝对不能上传 GitHub。
 
-仓库 `.gitignore` 已经忽略：
+## 公钥
 
-```text
-*.pem
-*.key
-*.p12
-*.pfx
-```
+嵌入 CleanC Windows 客户端。
 
-但仍然不要主动提交私钥。
-
-## cleanc-public.pem
-
-这是公钥，可以放入 CleanC Windows 客户端。
-
-客户端用它验证服务器返回的：
+客户端使用公钥验证服务器返回的：
 
 ```text
 signedPayload
 signature
 ```
 
-服务器私钥永远只留在 Cloudflare Secret 中。
+---
+
+# 十、首次激活流程
+
+推荐客户端流程：
+
+```text
+启动 CleanC
+↓
+本地没有有效授权
+↓
+GET /bootstrap/v1/config
+↓
+客户端使用内置服务器公钥验证 Bootstrap 签名
+↓
+取得 canonicalBaseUrl
+↓
+本机生成 P-256 设备密钥对
+↓
+私钥只保存在本机安全存储
+↓
+POST /api/v1/license/activate
+↓
+提交：
+licenseKey
+deviceId
+devicePublicKey
+deviceName
+windowsVersion
+appVersion
+↓
+服务器竞争激活锁
+↓
+成功者绑定设备
+↓
+返回签名 Lease
+```
+
+## 并发激活
+
+例如同一个授权码同时被三台电脑提交：
+
+```text
+A ─┐
+B ─┼→ 同一个授权码
+C ─┘
+```
+
+服务器使用 D1 锁：
+
+```text
+license:<licenseKey>
+```
+
+只有第一个成功取得锁的请求进入绑定流程。
+
+其他并发请求直接返回：
+
+```text
+ACTIVATION_BUSY
+```
+
+第一个设备完成绑定后，之后其他设备再提交同一个授权码会返回：
+
+```text
+LICENSE_ALREADY_BOUND
+```
+
+必须由管理员后台先解绑，才能换机。
 
 ---
 
-# 十三、配置完 Variables / Secrets 后重新部署
+# 十一、同一设备不能同时占两个授权
 
-Secret 和 Binding 配置完成后，重新部署一次 Production。
-
-进入：
+服务器同时对设备使用：
 
 ```text
-Deployments
-→ 最新部署
-→ Retry deployment
+device:<deviceId>
 ```
 
-也可以向 GitHub `main` 推送新 commit，让 Cloudflare 自动部署。
+激活锁。
+
+数据库还有：
+
+```text
+uq_one_active_license_per_device
+```
+
+唯一索引。
+
+因此：
+
+```text
+设备 A + 授权码 1 = 已绑定
+```
+
+在授权码 1 的绑定没有释放之前，设备 A 不能再直接绑定授权码 2。
+
+这样可以防止同一设备同时占用多个有效授权。
 
 ---
 
-# 十四、验证部署
+# 十二、72 小时 Lease
 
-假设你的 Pages 地址是：
+默认：
 
 ```text
-https://cleanc-license-server.pages.dev
+LEASE_HOURS=72
 ```
 
-依次测试：
+首次激活成功后服务器返回签名 Lease。
+
+Lease 中包含：
+
+```text
+version
+licenseId
+deviceId
+edition
+features
+issuedAt
+serverTime
+expiresAt
+licenseExpiresAt
+leaseHours
+renewalProtocol
+nonce
+```
+
+其中：
+
+```text
+expiresAt
+```
+
+是本次离线 Lease 到期时间。
+
+```text
+licenseExpiresAt
+```
+
+是授权总有效期。
+
+服务器实际使用：
+
+```text
+Lease 到期时间 = min(当前时间 + 72 小时, 授权总到期时间)
+```
+
+所以一个只剩 10 小时的 7 天授权，不会再拿到完整 72 小时 Lease，而只会拿到最多 10 小时。
+
+---
+
+# 十三、客户端倒计时和时间戳
+
+客户端左下角倒计时应该使用服务器签名数据里的：
+
+```text
+licenseExpiresAt
+```
+
+而不是客户端自己生成一个普通时间戳。
+
+必须先验证：
+
+```text
+signedPayload + signature
+```
+
+验证成功后才能信任里面的到期时间。
+
+建议客户端本地同时保存：
+
+```text
+serverTime
+licenseExpiresAt
+最近一次可信服务器时间
+本机单调时钟基准
+```
+
+正常运行时优先用单调计时器计算经过时间，避免用户简单修改 Windows 系统时间把倒计时拨回去。
+
+如果检测到本机系统时间明显回退到最近一次可信服务器时间之前，应拒绝继续延长本地有效期，等下次联网校准。
+
+---
+
+# 十四、72 小时续期：只需要两次请求
+
+旧版：
+
+```text
+challenge
+verify
+deviceProof
+refresh
+```
+
+已经废弃。
+
+当前生产流程只有：
+
+```text
+① POST /api/v1/device/challenge
+↓
+服务器返回一次性 nonce
+↓
+客户端用本机 P-256 私钥签 nonce
+↓
+② POST /api/v1/license/refresh
+   licenseKey
+   deviceId
+   nonce
+   signature
+↓
+服务器验证设备公钥
+↓
+nonce 标记已使用
+↓
+返回新的签名 Lease
+```
+
+正常情况下，每 72 小时只有这两次很小的网络请求。
+
+客户端在 Lease 仍有效时，不需要：
+
+- 每次启动验证服务器；
+- 定时每几分钟访问服务器；
+- 每次清理 C 盘都认证；
+- 单独调用 `device/verify`。
+
+---
+
+# 十五、废弃接口
+
+生产客户端不要再使用：
+
+```text
+POST /api/v1/license/validate
+POST /api/v1/device/verify
+```
+
+它们现在会返回：
+
+```text
+410 ENDPOINT_DEPRECATED
+```
+
+目的就是避免客户端继续走旧的高频/三步认证流程。
+
+---
+
+# 十六、授权总时间到期后的处理
+
+例如：
+
+```text
+7 天授权
+licenseExpiresAt = 2026-09-24 18:00
+```
+
+到达该时间后：
+
+```text
+客户端倒计时 = 0
+↓
+立即停止 CleanC 受授权保护的功能
+↓
+不得因为当前 Lease 原本还有时间而继续运行
+```
+
+因为服务器签发 Lease 时已经使用：
+
+```text
+min(72 小时, licenseExpiresAt)
+```
+
+所以正常实现下 Lease 本身也不会超过授权总到期时间。
+
+## 设备联网后的到期上报
+
+到期后客户端仍然可以调用：
+
+```text
+POST /api/v1/device/challenge
+```
+
+服务器会给当前已绑定设备一个 nonce，即使该授权总时间已经到期。
+
+客户端私钥签名后调用：
+
+```text
+POST /api/v1/license/refresh
+```
+
+服务器验证：
+
+1. 授权码；
+2. deviceId；
+3. 当前活动绑定；
+4. nonce；
+5. P-256 设备签名。
+
+验证通过后发现授权已经到期，会：
+
+```text
+把该 devices 记录 revoked_at 写入当前时间
+```
+
+并返回：
+
+```text
+LICENSE_EXPIRED_RELEASED
+```
+
+同时告诉客户端：
+
+```text
+deviceReleased = true
+canActivateNewLicense = true
+```
+
+这一步的作用是：**由原来真正绑定的设备自己证明身份并释放旧授权占用。**
+
+攻击者只知道 licenseKey + deviceId，没有对应设备私钥，不能伪造这个到期释放过程。
+
+---
+
+# 十七、到期后输入新授权码
+
+旧绑定完成释放后：
+
+```text
+设备 A
+旧授权：已到期 + 已释放
+↓
+输入新的授权码 B
+↓
+POST /api/v1/license/activate
+↓
+设备 A 可以绑定授权 B
+```
+
+新的授权同样开始自己的授权生命周期。
+
+---
+
+# 十八、原授权码续期
+
+管理后台对于：
+
+```text
+license_type = duration
+```
+
+的授权提供“续期”操作。
+
+管理员可以输入：
+
+```text
+续期 N 天
+```
+
+服务器计算：
+
+```text
+基准时间 = max(当前时间, 原 expires_at)
+新 expires_at = 基准时间 + N 天
+```
+
+所以：
+
+- 没过期就从原到期时间继续往后加；
+- 已经过期则从当前时间重新往后加；
+- 不修改第一次 `activated_at`；
+- 不把授权伪装成“从未激活”。
+
+如果管理员在设备上报到期**之前**已经续期：
+
+```text
+challenge + refresh
+```
+
+会直接得到新的 Lease，设备绑定继续保留。
+
+如果设备已经完成到期上报并释放绑定，管理员之后再续期：
+
+```text
+用户重新输入原授权码
+→ activate
+→ 原授权重新绑定该设备
+```
+
+---
+
+# 十九、管理员手动解绑
+
+后台设备管理中可以点击：
+
+```text
+解绑
+```
+
+解绑以后：
+
+- 当前设备不再占用这个授权码；
+- 这个授权码可以绑定另一台设备；
+- 原设备也可以改用另一个授权码。
+
+管理员解绑属于人工换机操作，与自然到期释放是两条独立流程。
+
+---
+
+# 二十、管理员创建授权
+
+管理后台已经删除“设备数量”设置。
+
+创建授权只需要选择：
+
+```text
+自定义授权码 / 随机授权码
+授权类型
+有效天数或固定到期时间
+生成数量
+备注
+```
+
+服务器无论收到什么 `maxDevices`，都会强制：
+
+```text
+max_devices = 1
+```
+
+---
+
+# 二十一、主要 API
+
+## 公共/客户端
+
+```text
+GET  /api/v1/health
+GET  /api/v1/meta
+GET  /bootstrap/v1/config
+POST /api/v1/license/activate
+POST /api/v1/device/challenge
+POST /api/v1/license/refresh
+```
+
+## 已废弃
+
+```text
+POST /api/v1/license/validate
+POST /api/v1/device/verify
+```
+
+## 管理后台
+
+```text
+/admin
+/admin/api/...
+```
+
+其中 duration 授权续期：
+
+```text
+POST /admin/api/licenses/{licenseId}/renew
+```
+
+---
+
+# 二十二、生产验证
+
+部署后依次检查：
 
 ## Health
 
 ```text
-https://cleanc-license-server.pages.dev/api/v1/health
+https://你的项目.pages.dev/api/v1/health
 ```
 
-应返回：
+应该返回：
 
 ```json
 {
@@ -673,58 +871,36 @@ https://cleanc-license-server.pages.dev/api/v1/health
 }
 ```
 
-## Meta
-
-```text
-https://cleanc-license-server.pages.dev/api/v1/meta
-```
-
 ## Bootstrap
 
 ```text
-https://cleanc-license-server.pages.dev/bootstrap/v1/config
+https://你的项目.pages.dev/bootstrap/v1/config
 ```
 
-应该能看到：
+应该包含：
 
 ```text
-apiVersion
 canonicalBaseUrl
 issuedAt
 signedPayload
 signature
 ```
 
-## 管理后台
-
-打开：
+## Admin
 
 ```text
-https://cleanc-license-server.pages.dev/admin
+https://你的项目.pages.dev/admin
 ```
 
-应该出现 CleanC 管理登录页面。
-
-登录需要：
+登录必须经过：
 
 ```text
-管理员密码 + Cloudflare Turnstile
+管理员密码 + Turnstile
 ```
 
----
+## D1
 
-# 十五、检查 D1 是否真的自动建表
-
-进入：
-
-```text
-Cloudflare
-→ D1
-→ cleanc-license
-→ Console / Explorer
-```
-
-此时应该可以看到这些表：
+第一次正常访问后应看到：
 
 ```text
 licenses
@@ -734,335 +910,66 @@ system_settings
 domain_history
 device_challenges
 rate_limits
+activation_locks
 ```
-
-如果能看到，说明自动建表成功。
-
-你不需要手动执行任何建表 SQL。
 
 ---
 
-# 十六、以后 GitHub 怎么更新
+# 二十三、正式域名
 
-Cloudflare Pages 已经和 GitHub 绑定以后：
-
-```text
-GitHub main
-    ↓ push
-Cloudflare 自动发现新 commit
-    ↓
-npm install
-    ↓
-npm run build
-    ↓
-Pages 自动部署
-```
-
-所以以后不需要：
-
-```text
-wrangler deploy
-GitHub Actions
-Cloudflare API Token
-```
-
-Cloudflare 官方 Pages Git Integration 本身负责拉取 GitHub 并自动部署。
-
----
-
-# 十七、绑定正式域名
-
-Pages 自带域名可以一直保留：
+Pages 自带地址建议一直保留作为 Bootstrap：
 
 ```text
 https://xxxxx.pages.dev
 ```
 
-它建议作为 Bootstrap 永久入口。
-
-正式对外授权域名，例如：
+正式授权域名例如：
 
 ```text
 https://license.example.com
 ```
 
-可以在 Pages 项目的 Custom domains 中绑定。
+在 Pages Custom domains 绑定后：
 
-绑定完成后：
+1. 测试 `/api/v1/health`；
+2. 把正式域名加入 Turnstile Hostname Management；
+3. 登录 `/admin`；
+4. 在设置中保存新的主授权域名。
 
-1. 确认：
-
-```text
-https://license.example.com/api/v1/health
-```
-
-可以正常访问；
-
-2. 把：
-
-```text
-license.example.com
-```
-
-加入 Turnstile Hostname Management；
-
-3. 打开：
-
-```text
-https://license.example.com/admin
-```
-
-4. 在设置页填写：
-
-```text
-https://license.example.com
-```
-
-5. 输入管理员密码并完成 Turnstile 二次验证；
-
-6. 点击检测并保存。
-
-之后：
+客户端以后通过签名 Bootstrap 获得最新：
 
 ```text
 canonicalBaseUrl
 ```
 
-会切换到正式域名。
-
-而：
-
-```text
-BOOTSTRAP_BASE_URL
-```
-
-仍然保持：
-
-```text
-https://xxxxx.pages.dev
-```
-
-这样以后正式域名再次变化，Windows 客户端仍然有稳定入口。
-
 ---
 
-# 十八、Windows 客户端推荐授权流程
+# 二十四、生产上线检查表
 
-## 首次激活
-
-```text
-客户端
- ↓
-GET /bootstrap/v1/config
- ↓
-使用内置服务器公钥验证 Bootstrap signature
- ↓
-读取 canonicalBaseUrl
- ↓
-本机生成 P-256 设备密钥对
- ↓
-POST /api/v1/license/activate
- ↓
-提交 licenseKey + deviceId + devicePublicKey
- ↓
-服务器绑定设备并返回短期 License Lease
-```
-
-## 后续续租
+上线前确认：
 
 ```text
-POST /api/v1/device/challenge
- ↓
-服务器返回一次性 nonce
- ↓
-Windows 本机私钥签名 nonce
- ↓
-POST /api/v1/device/verify
- ↓
-服务器验证设备公钥
- ↓
-返回短时 deviceProof
- ↓
-POST /api/v1/license/validate
-或
-POST /api/v1/license/refresh
- ↓
-提交 deviceProof
- ↓
-服务器签发新的 License Lease
+[ ] Cloudflare Pages 已连接 GitHub main
+[ ] Build command = npm run build
+[ ] Build output = public
+[ ] D1 已绑定为 DB
+[ ] TURNSTILE_SITE_KEY 已设置
+[ ] TURNSTILE_SECRET 已加密设置
+[ ] ADMIN_PASSWORD 已加密设置
+[ ] SESSION_SECRET 已加密设置
+[ ] LICENSE_SIGNING_PRIVATE_KEY 已加密设置
+[ ] LEASE_HOURS = 72
+[ ] BOOTSTRAP_BASE_URL 指向稳定 pages.dev 地址
+[ ] Windows 客户端内置服务器公钥
+[ ] 客户端私钥只保存在本机安全存储
+[ ] 客户端验证 signedPayload/signature 后才信任时间
+[ ] 客户端倒计时使用 licenseExpiresAt
+[ ] 客户端不允许通过回拨系统时间延长授权
+[ ] Lease 有效时不进行高频在线认证
+[ ] Lease 到期前使用 challenge + refresh
+[ ] 授权总时间到 0 立即停止使用
+[ ] 到期联网后完成 LICENSE_EXPIRED_RELEASED
+[ ] 新授权激活前确保旧活动绑定已释放
 ```
 
-因此只有：
-
-```text
-licenseKey + deviceId
-```
-
-不足以完成正常续租，还需要对应设备私钥。
-
----
-
-# 十九、主要 API
-
-```text
-GET  /api/v1/health
-GET  /api/v1/meta
-GET  /bootstrap/v1/config
-POST /api/v1/license/activate
-POST /api/v1/license/validate
-POST /api/v1/license/refresh
-POST /api/v1/device/challenge
-POST /api/v1/device/verify
-```
-
-管理后台：
-
-```text
-/admin
-```
-
----
-
-# 二十、常见问题
-
-## 1. 返回 D1_BINDING_MISSING
-
-原因：Pages 没有绑定 D1，或者绑定变量名不是 `DB`。
-
-检查：
-
-```text
-Settings
-→ Bindings
-→ D1 database
-```
-
-变量名必须是：
-
-```text
-DB
-```
-
-然后重新部署。
-
----
-
-## 2. 返回 D1_SCHEMA_INIT_FAILED
-
-先确认：
-
-- D1 数据库存在；
-- Pages 确实绑定到了正确 D1；
-- Production 环境也配置了绑定；
-- 修改 Binding 后已经重新部署。
-
----
-
-## 3. 管理后台 Turnstile 一直失败
-
-检查 Turnstile Hostname Management 是否包含当前访问域名。
-
-如果当前使用：
-
-```text
-xxxxx.pages.dev
-```
-
-就必须允许这个 hostname。
-
-以后使用正式域名，也要把正式域名加入。
-
----
-
-## 4. Cloudflare Pages 构建失败
-
-确认构建设置：
-
-```text
-Build command: npm run build
-Build output directory: public
-Root directory: 留空
-```
-
-`npm run build` 会运行 TypeScript 检查，所以如果报 TS 错误，应先修代码再部署。
-
----
-
-## 5. 为什么仓库里没有 wrangler.jsonc？
-
-这是故意的。
-
-当前目标是：
-
-```text
-Cloudflare Pages 控制台管理 Binding / Variables / Secrets
-+
-GitHub 直接自动部署
-```
-
-D1 不在仓库中声明，也不需要 database_id。
-
-这样不会因为公开仓库泄漏环境配置，也减少 Worker 配置和 Pages Dashboard 配置互相冲突的风险。
-
----
-
-## 6. 为什么没有 migrations 目录？
-
-当前版本使用 `src/pages.ts` 自动维护基础数据库结构。
-
-你创建一个空白 D1，绑定成 `DB` 后，第一次请求就会自动建立当前所需表结构。
-
----
-
-# 二十一、上线前检查清单
-
-请全部确认：
-
-- [ ] Cloudflare Pages 已连接 `wwz554/CleanC-License-Server`
-- [ ] Production branch = `main`
-- [ ] Build command = `npm run build`
-- [ ] Build output directory = `public`
-- [ ] D1 数据库已创建
-- [ ] D1 Binding 变量名 = `DB`
-- [ ] `APP_NAME=CleanC`
-- [ ] `TURNSTILE_SITE_KEY` 已设置
-- [ ] `LEASE_HOURS=72`
-- [ ] `BOOTSTRAP_BASE_URL=https://你的项目.pages.dev`
-- [ ] `ADMIN_PASSWORD` 使用 Secret
-- [ ] `SESSION_SECRET` 使用 Secret
-- [ ] `DEVICE_PROOF_SECRET` 使用 Secret
-- [ ] `TURNSTILE_SECRET` 使用 Secret
-- [ ] `LICENSE_SIGNING_PRIVATE_KEY` 使用 Secret
-- [ ] Turnstile 已允许 pages.dev hostname
-- [ ] 重新部署 Production
-- [ ] `/api/v1/health` 正常
-- [ ] `/bootstrap/v1/config` 正常
-- [ ] `/admin` 可以打开
-- [ ] D1 已自动出现 7 张表
-- [ ] 服务器签名公钥已经嵌入 Windows 客户端
-
----
-
-# 二十二、安全说明
-
-没有任何纯客户端软件能够做到“绝对无法破解”。CleanC License Server 的安全目标是：
-
-- 授权状态由服务器决定；
-- 服务端私钥永远不进入 Windows 客户端；
-- 客户端只保存服务器公钥；
-- License Lease 有有效期；
-- 设备私钥参与后续续租；
-- challenge 一次性使用；
-- deviceProof 有短有效期；
-- 管理后台使用 Session + CSRF + Turnstile；
-- 管理敏感操作进行二次验证；
-- 敏感变量只放 Cloudflare Secrets。
-
-对于当前项目，推荐始终保留：
-
-```text
-pages.dev = Bootstrap 固定入口
-正式自定义域名 = canonicalBaseUrl 主授权 API
-```
-
-这样最便于以后换域名，同时也最不容易导致已经发布的 CleanC 客户端失联。
+完成以上项目后，即为当前 CleanC License Server 的生产授权模型。
