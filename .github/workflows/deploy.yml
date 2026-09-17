@@ -9,6 +9,7 @@ on:
       - 'migrations/**'
       - 'wrangler.jsonc'
       - 'package.json'
+      - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
@@ -17,16 +18,47 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npm run typecheck
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript check
+        run: npm run typecheck
+
+      - name: Verify Cloudflare configuration
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if grep -q 'TODO_D1_DATABASE_ID' wrangler.jsonc; then
+            echo '::error::wrangler.jsonc 里的 TODO_D1_DATABASE_ID 还没有替换为真实 D1 database_id。'
+            exit 1
+          fi
+          if grep -q 'TODO_TURNSTILE_SITE_KEY' wrangler.jsonc; then
+            echo '::error::wrangler.jsonc 里的 TODO_TURNSTILE_SITE_KEY 还没有替换为真实 Turnstile Site Key。'
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo '::error::GitHub Actions Secret CLOUDFLARE_API_TOKEN 未配置。'
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo '::error::GitHub Actions Secret CLOUDFLARE_ACCOUNT_ID 未配置。'
+            exit 1
+          fi
+
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply cleanc-license --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Deploy Worker
         run: npx wrangler deploy
         env:
