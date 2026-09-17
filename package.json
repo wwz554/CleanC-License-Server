@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run typecheck",
+    "build": "npm run typecheck && npm run check:admin",
     "typecheck": "tsc --noEmit",
+    "check:admin": "node --experimental-strip-types scripts/check-admin-html.mjs",
     "pages:dev": "wrangler pages dev public"
   },
   "devDependencies": {
