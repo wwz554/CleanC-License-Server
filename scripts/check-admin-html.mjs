@@ -1,4 +1,3 @@
-import { adminPage } from '../src/admin.ts';
 import { prepareAuthenticatedAdminResponse } from '../src/authenticated-admin.ts';
 
 function assert(condition, message) {
@@ -10,42 +9,31 @@ function checkInlineScripts(html, label) {
     .map(match => match[1])
     .filter(script => script.trim());
   assert(scripts.length > 0, `${label}: 没有找到内联脚本`);
-  for (const script of scripts) {
-    // 这一步检查浏览器实际接收到的 JavaScript 是否能被解析。
-    new Function(script);
-  }
+  for (const script of scripts) new Function(script);
 }
 
-const raw = adminPage('password-only-disabled');
-checkInlineScripts(raw, '原始后台页面');
-
 const request = new Request('https://cleanc-license-server.pages.dev/admin', {
-  headers: {
-    cookie: 'cleanc_session=test-payload.test-signature',
-  },
+  headers: { cookie: 'cleanc_session=test-payload.test-signature' },
 });
-const env = {
-  SESSION_SECRET: 'ci-session-secret',
-};
-const response = new Response(raw, {
+const env = { SESSION_SECRET: 'ci-session-secret' };
+const response = new Response('<!doctype html><html><body>legacy shell</body></html>', {
   status: 200,
   headers: { 'content-type': 'text/html; charset=utf-8' },
 });
 const prepared = await prepareAuthenticatedAdminResponse(response, request, env);
 const html = await prepared.text();
 
-assert(
-  html.includes('<div id="login" class="login glass hidden" style="display:none!important">'),
-  '已登录后台仍然显示旧登录壳',
-);
-assert(
-  html.includes('<div id="app" class="app" style="display:block">'),
-  '已登录后台没有直接显示管理 App',
-);
-assert(!html.includes('licenseTypeChanged();boot();'), '已登录后台仍依赖 boot() 二次判断 Session');
-assert(html.includes('licenseTypeChanged();loadDashboard();'), '已登录后台没有直接加载仪表盘');
-assert(/var csrf='[^']+';/.test(html), '已登录后台没有注入 CSRF Token');
-assert(!html.includes('challenges.cloudflare.com/turnstile/v0/api.js'), '已登录后台仍加载 Turnstile');
+assert(html.includes('CleanC 授权服务管理中心'), '缺少后台主界面');
+assert(html.includes('data-tab="dashboard"'), '缺少仪表盘菜单');
+assert(html.includes('data-tab="licenses"'), '缺少授权管理菜单');
+assert(html.includes('data-tab="devices"'), '缺少设备管理菜单');
+assert(html.includes('data-tab="logs"'), '缺少操作日志菜单');
+assert(html.includes('data-tab="settings"'), '缺少设置菜单');
+assert(html.includes('var CSRF='), '没有注入 CSRF Token');
+assert(!html.includes('challenges.cloudflare.com'), '已登录后台仍依赖 Turnstile');
+assert(!html.includes('onclick='), '后台仍包含动态 inline onclick');
+assert(!html.includes('boot();'), '后台仍依赖旧 boot() 登录判断');
+assert(html.includes("addEventListener('click'"), '菜单/按钮没有使用事件监听器');
 
 checkInlineScripts(html, '已登录后台页面');
-console.log('Admin HTML/JS check passed');
+console.log('Authenticated admin HTML/JS check passed');
