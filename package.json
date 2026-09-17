@@ -12,8 +12,8 @@
     "db:remote": "wrangler d1 migrations apply cleanc-license --remote"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260917.0",
-    "typescript": "^5.9.2",
-    "wrangler": "^4.38.0"
+    "@cloudflare/workers-types": "latest",
+    "typescript": "latest",
+    "wrangler": "latest"
   }
 }
