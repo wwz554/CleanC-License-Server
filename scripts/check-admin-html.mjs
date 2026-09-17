@@ -1,4 +1,4 @@
-import { prepareAuthenticatedAdminResponse } from '../src/authenticated-admin.ts';
+import { prepareAuthenticatedAdminResponse } from '../src/admin-dashboard.ts';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -31,7 +31,7 @@ assert(html.includes('data-tab="logs"'), '缺少操作日志菜单');
 assert(html.includes('data-tab="settings"'), '缺少设置菜单');
 assert(html.includes('var CSRF='), '没有注入 CSRF Token');
 assert(!html.includes('challenges.cloudflare.com'), '已登录后台仍依赖 Turnstile');
-assert(!html.includes('onclick='), '后台仍包含动态 inline onclick');
+assert(!html.includes('onclick='), '后台仍包含 inline onclick');
 assert(!html.includes('boot();'), '后台仍依赖旧 boot() 登录判断');
 assert(html.includes("addEventListener('click'"), '菜单/按钮没有使用事件监听器');
 
