@@ -20,13 +20,17 @@ Lease Version: 4
 一台设备: 同一时间最多 1 个活动授权
 ```
 
-## 保姆级安装教程
+## 文档
 
-请直接阅读：
+从零部署请直接阅读：
 
 **[安装部署教程.md](./安装部署教程.md)**
 
-里面已经按 Cloudflare Pages 直接连接 GitHub 的方式写好，从创建 Pages、绑定 D1、创建 Turnstile、填写 Variables/Secrets、生成 P-256 密钥到生产验证全部有简体中文说明和填写实例。
+正式给客户使用之前，请逐项执行：
+
+**[生产上线验收清单.md](./生产上线验收清单.md)**
+
+安装教程已经按 Cloudflare Pages 直接连接 GitHub 的方式写好，从创建 Pages、绑定 D1、创建 Turnstile、填写 Variables/Secrets、生成 P-256 密钥到生产验证都有简体中文说明和填写实例。
 
 ---
 
@@ -50,7 +54,7 @@ Windows 客户端右下角只显示：
 永久授权
 ```
 
-`expiresAt` 仍然表示 72 小时内部 Lease，到期前客户端静默续租；它不是永久授权的总到期时间。
+`expiresAt` 仍然表示默认 72 小时的内部 Lease，到期前客户端静默续租；它不是永久授权的总到期时间。
 
 ## 激活后 N 天
 
@@ -95,6 +99,16 @@ device:<deviceId>
 原设备可以绑定其他授权码
 ```
 
+生产激活还采用：
+
+```text
+公网 IP 宽松总限流
++
+单设备细粒度限流
+```
+
+这样公司、校园网、运营商 NAT 等共享公网 IP 的正常客户不会因为共用出口地址轻易互相误伤。
+
 ---
 
 # 72 小时续期
@@ -126,6 +140,8 @@ POST /api/v1/device/verify
 
 已经废弃，生产客户端不要使用。
 
+续租限流同样按“公网 IP 宽松总限流 + 单设备细限流”处理，降低共享 NAT 环境误伤。
+
 ---
 
 # 授权总时间到期
@@ -138,15 +154,19 @@ POST /api/v1/device/verify
 challenge + refresh
 ```
 
-服务器验证设备私钥以后释放旧绑定，并返回：
+服务器验证设备私钥以后，再次读取并原子确认授权仍然过期，然后才释放旧绑定并返回：
 
 ```text
 LICENSE_EXPIRED_RELEASED
 ```
 
+这样可以避免设备刚到期上报时管理员恰好续期，服务端仍按旧状态误解绑客户。
+
 之后设备可以激活新的授权码。
 
 如果管理员已经给原时长授权续期，则原设备可以继续刷新；如果旧绑定已经释放，则重新激活原授权码即可。
+
+管理员给 duration 授权“续期”只延长到期时间；如果该授权之前是 `disabled`，续期不会自动恢复为 `active`，必须由管理员明确点击“恢复”。
 
 ---
 
@@ -233,24 +253,44 @@ CleanC-License-Server/
 │  ├─ index.html
 │  └─ _routes.json
 ├─ src/
-│  ├─ admin.ts
-│  ├─ worker.ts
-│  ├─ pages.ts
+│  ├─ router.ts
+│  ├─ activation.ts
 │  ├─ production.ts
+│  ├─ pages.ts
+│  ├─ worker.ts
+│  ├─ admin.ts
 │  └─ webcrypto-compat.d.ts
 ├─ .github/workflows/ci.yml
 ├─ .env.example
 ├─ package.json
 ├─ tsconfig.json
 ├─ README.md
-└─ 安装部署教程.md
+├─ 安装部署教程.md
+└─ 生产上线验收清单.md
 ```
 
-`src/production.ts` 是外部生产入口，负责统一 API v3 / Lease v4、生产数据库热修、永久授权明确字段和关键输入保护。
+各层职责：
 
-`src/pages.ts` 负责 D1 自动初始化、单设备约束、并发激活锁、两步续期和到期释放。
+```text
+functions/*
+  ↓
+src/router.ts
+  ↓
+生产激活 → src/activation.ts
+生产 Bootstrap / health / meta / challenge / refresh → src/production.ts
+数据库初始化、后台兼容层 → src/pages.ts
+基础后台与历史兼容核心 → src/worker.ts
+```
 
-`src/worker.ts` 保留基础授权与管理后台核心逻辑，由生产入口保护后使用。
+`src/router.ts` 是 Cloudflare Pages 对外请求的最外层生产路由，负责初始化重试、NAT 友好限流、生产激活分流，以及数据库额外安全保护。
+
+`src/activation.ts` 专门处理生产首次激活、设备/授权双锁、单设备绑定、首次计时和生产 Lease 签发。
+
+`src/production.ts` 负责外部 API v3 / Lease v4、Bootstrap 签名、两步续期、到期安全释放和生产数据库热修。
+
+`src/pages.ts` 负责 D1 自动初始化、历史数据库兼容升级和管理 API 包装。
+
+`src/worker.ts` 中仍保留部分 API v2 / 旧 Device Proof 兼容代码，但它不是 Pages 对外入口。外部生产请求全部先经过 `functions/* → router.ts`，生产客户端只能使用本文列出的 API v3 流程。
 
 ---
 
