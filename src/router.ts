@@ -1,6 +1,7 @@
 import { handlePagesRequest } from './pages';
 import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
+import { handlePasswordAdmin, stripTurnstileFromAdminResponse } from './admin-password';
 import type { Env } from './worker';
 
 const ROUTER_DB_GUARD_VERSION = '2';
@@ -15,6 +16,16 @@ function json(data: unknown, status = 200): Response {
       'referrer-policy': 'no-referrer',
     },
   });
+}
+
+function withLegacyAdminCompat(env: Env): Env {
+  return {
+    ...env,
+    // 旧 Pages/Worker 层仍保留 Turnstile 字段检查。
+    // 当前生产后台已经由 admin-password.ts 接管，不再实际调用 Turnstile。
+    TURNSTILE_SECRET: String(env.TURNSTILE_SECRET || '').trim() || 'password-only-disabled',
+    TURNSTILE_SITE_KEY: String(env.TURNSTILE_SITE_KEY || '').trim() || 'password-only-disabled',
+  };
 }
 
 async function consumeRateLimit(env: Env, key: string, max: number, seconds: number): Promise<boolean> {
@@ -172,23 +183,34 @@ async function routeAdminRenew(request: Request, env: Env, licenseId: string): P
 }
 
 export async function handleAppRequest(request: Request, env: Env): Promise<Response> {
-  const initError = await ensureRuntime(request, env);
+  // 新生产后台不再依赖 Turnstile。这里给旧内部兼容层补占位值，
+  // 因此 Cloudflare 可以删除 TURNSTILE_SITE_KEY / TURNSTILE_SECRET。
+  const runtimeEnv = withLegacyAdminCompat(env);
+
+  const initError = await ensureRuntime(request, runtimeEnv);
   if (initError) return initError.clone();
 
   const path = new URL(request.url).pathname;
 
+  const adminResponse = await handlePasswordAdmin(request, runtimeEnv);
+  if (adminResponse) return adminResponse;
+
   if (path === '/api/v1/license/activate' && request.method === 'POST') {
-    return handleProductionActivation(request, env);
+    return handleProductionActivation(request, runtimeEnv);
   }
 
   if ((path === '/api/v1/device/challenge' || path === '/api/v1/license/refresh') && request.method === 'POST') {
-    return routeRenewal(request, env);
+    return routeRenewal(request, runtimeEnv);
   }
 
   const renew = path.match(/^\/admin\/api\/licenses\/([^/]+)\/renew$/);
   if (renew && request.method === 'POST') {
-    return routeAdminRenew(request, env, renew[1]);
+    return routeAdminRenew(request, runtimeEnv, renew[1]);
   }
 
-  return handleProductionRequest(request, env);
+  const response = await handleProductionRequest(request, runtimeEnv);
+  if ((path === '/admin' || path === '/admin/' || path === '/admin/login') && request.method === 'GET') {
+    return stripTurnstileFromAdminResponse(response);
+  }
+  return response;
 }
