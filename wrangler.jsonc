@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cleanc-license-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-17",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cleanc-license",
+      "database_id": "TODO_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "APP_NAME": "CleanC",
+    "TURNSTILE_SITE_KEY": "TODO_TURNSTILE_SITE_KEY",
+    "LEASE_HOURS": "72"
+  }
+}
