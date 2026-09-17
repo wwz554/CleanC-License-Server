@@ -1,15 +1,12 @@
 {
   "name": "cleanc-license-server",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build": "npm run typecheck",
     "typecheck": "tsc --noEmit",
-    "d1:create": "wrangler d1 create cleanc-license",
-    "db:local": "wrangler d1 migrations apply cleanc-license --local",
-    "db:remote": "wrangler d1 migrations apply cleanc-license --remote"
+    "pages:dev": "wrangler pages dev public"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
