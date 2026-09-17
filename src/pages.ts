@@ -74,8 +74,7 @@ async function ensureSchema(env: Env): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(license_key)`,
       `CREATE INDEX IF NOT EXISTS idx_devices_license ON devices(license_id)`,
       `CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_challenges_device ON device_challenges(device_id, created_at DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_challenges_license_device ON device_challenges(license_id, device_id, created_at DESC)`
+      `CREATE INDEX IF NOT EXISTS idx_challenges_device ON device_challenges(device_id, created_at DESC)`
     ];
 
     for (const sql of statements) await env.DB.prepare(sql).run();
@@ -84,8 +83,8 @@ async function ensureSchema(env: Env): Promise<void> {
     const hasLicenseId = columns.results.some(column => column.name === 'license_id');
     if (!hasLicenseId) {
       await env.DB.prepare('ALTER TABLE device_challenges ADD COLUMN license_id TEXT').run();
-      await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_challenges_license_device ON device_challenges(license_id, device_id, created_at DESC)').run();
     }
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_challenges_license_device ON device_challenges(license_id, device_id, created_at DESC)').run();
   })().catch(error => {
     schemaReady = null;
     throw error;
