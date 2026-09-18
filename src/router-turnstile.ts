@@ -1,5 +1,6 @@
 import { handleAdminTurnstile } from './admin-turnstile';
 import { handleAdminPhysicalDelete } from './admin-delete';
+import { handleAdminPaginatedList } from './admin-list';
 import { applyBeijingAdminResponse } from './admin-timezone';
 import { handleAppRequest } from './router';
 import type { Env } from './worker';
@@ -26,6 +27,10 @@ export async function handleTurnstileAppRequest(request: Request, env: Env): Pro
     const turnstile = await handleAdminTurnstile(request, env);
     if (turnstile) return turnstile;
   }
+
+  // 授权/设备列表使用服务端分页与搜索，避免一次查询大量记录。
+  const paginated = await handleAdminPaginatedList(request, env);
+  if (paginated) return applyBeijingAdminResponse(paginated, path);
 
   // 物理删除只允许后台管理员发起，并由独立模块做 Session + CSRF 校验。
   const deletion = await handleAdminPhysicalDelete(request, env);
