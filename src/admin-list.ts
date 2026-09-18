@@ -160,7 +160,7 @@ export async function handleAdminPaginatedList(
       OR COALESCE(d.device_name,'') LIKE ? ESCAPE '\\'
     )`);
     const pattern = likePattern(q);
-    bindings.push(pattern, pattern, pattern, pattern);
+    bindings.push(pattern, pattern, pattern);
   }
   if (binding === 'bound') where.push('d.revoked_at IS NULL');
   if (binding === 'unbound') where.push('d.revoked_at IS NOT NULL');
