@@ -43,7 +43,10 @@ assert(html.includes('var CSRF='), '没有注入 CSRF Token');
 assert(!html.includes('challenges.cloudflare.com'), '已登录后台不应加载 Turnstile');
 assert(!html.includes('onclick='), '后台仍包含 inline onclick');
 assert(!html.includes('boot();'), '后台仍依赖旧 boot() 登录判断');
-assert(html.includes("addEventListener('click'"), '菜单/按钮没有使用事件监听器');\nassert(html.includes('data-action=\\"delete-license\\"'), '缺少禁用授权删除操作');\nassert(html.includes('data-action=\\"delete-device\\"'), '缺少已解绑设备删除操作');\nassert(html.includes('more-wrap'), '缺少授权三点下拉菜单');
+assert(html.includes("addEventListener('click'"), '菜单/按钮没有使用事件监听器');
+assert(html.includes('data-action="delete-license"'), '缺少禁用授权删除操作');
+assert(html.includes('data-action="delete-device"'), '缺少已解绑设备删除操作');
+assert(html.includes('more-wrap'), '缺少授权三点下拉菜单');
 
 checkInlineScripts(html, '已登录后台页面');
 console.log('Admin Turnstile login + authenticated dashboard HTML/JS checks passed');
