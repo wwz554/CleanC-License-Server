@@ -1,10 +1,12 @@
 import { handleAdminTurnstile } from './admin-turnstile';
+import { applyBeijingAdminResponse } from './admin-timezone';
 import { handleAppRequest } from './router';
 import type { Env } from './worker';
 
 /**
  * 只在管理员登录链路增加 Turnstile。
  * 客户端激活、challenge、refresh 等授权 API 仍直接走原生产路由。
+ * 管理后台 JSON 时间统一转换为北京时间显示，授权核心仍使用 UTC。
  */
 export async function handleTurnstileAppRequest(request: Request, env: Env): Promise<Response> {
   const path = new URL(request.url).pathname;
@@ -24,5 +26,6 @@ export async function handleTurnstileAppRequest(request: Request, env: Env): Pro
     if (turnstile) return turnstile;
   }
 
-  return handleAppRequest(request, env);
+  const response = await handleAppRequest(request, env);
+  return applyBeijingAdminResponse(response, path);
 }
