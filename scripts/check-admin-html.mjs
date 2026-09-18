@@ -47,6 +47,13 @@ assert(html.includes("addEventListener('click'"), '菜单/按钮没有使用事�
 assert(html.includes('data-action="delete-license"'), '缺少禁用授权删除操作');
 assert(html.includes('data-action="delete-device"'), '缺少已解绑设备删除操作');
 assert(html.includes('more-wrap'), '缺少授权三点下拉菜单');
+assert(html.includes('id="licenseSearch"'), '缺少授权搜索框');
+assert(html.includes('id="licenseStatusFilter"'), '缺少授权状态筛选');
+assert(html.includes('id="licensePrevBtn"') && html.includes('id="licenseNextBtn"'), '缺少授权分页按钮');
+assert(html.includes('id="deviceSearch"'), '缺少设备搜索框');
+assert(html.includes('id="deviceBindingFilter"'), '缺少设备绑定状态筛选');
+assert(html.includes('id="devicePrevBtn"') && html.includes('id="deviceNextBtn"'), '缺少设备分页按钮');
+assert(html.includes('formatCustomLicenseKey'), '缺少自定义授权码自动格式化');
 
 checkInlineScripts(html, '已登录后台页面');
 console.log('Admin Turnstile login + authenticated dashboard HTML/JS checks passed');
