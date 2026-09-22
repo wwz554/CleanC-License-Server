@@ -57,3 +57,4 @@ assert(html.includes('formatCustomLicenseKey'), '缺少自定义授权码自动�
 
 checkInlineScripts(html, '已登录后台页面');
 console.log('Admin Turnstile login + authenticated dashboard HTML/JS checks passed');
+

@@ -157,3 +157,4 @@ export async function handleDomainSettings(request: Request, env: Env): Promise<
   await audit(env, request, 'DOMAIN_ROLLBACK', { old, next: fallback });
   return json({ success: true, canonicalBaseUrl: fallback });
 }
+

@@ -1,3 +1,4 @@
+import { effectiveStatusSql } from './license-status';
 import { adminPage } from './admin';
 
 export interface Env {
@@ -300,7 +301,7 @@ async function adminApi(req: Request, env: Env, path: string): Promise<Response>
   if (path === '/admin/api/session' && req.method === 'GET') return json({ success: true, csrfToken: await csrfToken(req, env) });
   if (path === '/admin/api/logout' && req.method === 'POST') return json({ success: true }, 200, { 'set-cookie': 'cleanc_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0' });
   if (path === '/admin/api/dashboard' && req.method === 'GET') {
-    const l = await env.DB.prepare("SELECT COUNT(*) total,SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active,SUM(CASE WHEN status='disabled' THEN 1 ELSE 0 END) disabled FROM licenses WHERE deleted_at IS NULL").first<any>();
+    const l = await env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN (${effectiveStatusSql('licenses')})='active' THEN 1 ELSE 0 END) active,SUM(CASE WHEN status='disabled' THEN 1 ELSE 0 END) disabled FROM licenses WHERE deleted_at IS NULL`).first<any>();
     const d = await env.DB.prepare('SELECT COUNT(*) c FROM devices WHERE revoked_at IS NULL').first<{ c:number }>();
     return json({ success:true, stats:{ total:l?.total||0, active:l?.active||0, disabled:l?.disabled||0, devices:d?.c||0 } });
   }
@@ -355,3 +356,4 @@ export default {
     }
   }
 };
+

@@ -252,6 +252,14 @@ async function ensureSchema(env: Env): Promise<void> {
         lock_token TEXT NOT NULL,
         locked_until INTEGER NOT NULL
       )`,
+      `CREATE TABLE IF NOT EXISTS offline_activation_sessions (
+        session_id TEXT PRIMARY KEY,
+        request_hash TEXT NOT NULL,
+        license_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
     ];
     for (const sql of tableStatements) await env.DB.prepare(sql).run();
 
@@ -326,6 +334,7 @@ async function ensureSchema(env: Env): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_challenges_expiry ON device_challenges(expires_at, used_at)`,
       `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
       `CREATE INDEX IF NOT EXISTS idx_activation_locks_until ON activation_locks(locked_until)`,
+      `CREATE INDEX IF NOT EXISTS idx_offline_sessions_expiry ON offline_activation_sessions(expires_at, status)`,
       `CREATE INDEX IF NOT EXISTS idx_challenges_license_device ON device_challenges(license_id, device_id, created_at DESC)`,
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_one_active_device_per_license
         ON devices(license_id) WHERE revoked_at IS NULL`,

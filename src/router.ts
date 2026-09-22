@@ -1,3 +1,4 @@
+import { handleOffline } from './offline-activation';
 import { handlePagesRequest } from './pages';
 import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
@@ -180,6 +181,9 @@ export async function handleAppRequest(request: Request, env: Env): Promise<Resp
 
   const path = new URL(request.url).pathname;
 
+  const offline = await handleOffline(request, runtimeEnv);
+  if(offline)return offline;
+
   // 自定义域名保存/回滚优先走当前 Origin 验证，避免 Pages Function 自己 fetch 自己造成误判。
   const domainSettingsResponse = await handleDomainSettings(request, runtimeEnv);
   if (domainSettingsResponse) return domainSettingsResponse;
@@ -212,3 +216,4 @@ export async function handleAppRequest(request: Request, env: Env): Promise<Resp
 
   return response;
 }
+

@@ -39,3 +39,4 @@ export async function handleTurnstileAppRequest(request: Request, env: Env): Pro
   const response = await handleAppRequest(request, env);
   return applyBeijingAdminResponse(response, path);
 }
+

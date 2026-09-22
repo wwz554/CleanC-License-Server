@@ -55,3 +55,4 @@ q('loginForm').addEventListener('submit',function(e){e.preventDefault();doLogin(
 licenseTypeChanged();boot();
 </script></body></html>`;
 }
+
