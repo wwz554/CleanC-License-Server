@@ -402,3 +402,4 @@ export async function handleProductionActivation(request: Request, env: Env): Pr
     await releaseLock(env, deviceLockKey, deviceLock);
   }
 }
+

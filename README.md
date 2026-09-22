@@ -18,6 +18,7 @@ Lease Version: 4
 续期: challenge + refresh
 一个授权码: 同一时间最多 1 台设备
 一台设备: 同一时间最多 1 个活动授权
+离线激活: 手机扫码 + 公开页面输入授权码 + 电脑输入 16 位短码
 ```
 
 ## 文档
@@ -232,9 +233,43 @@ ADMIN_PASSWORD
 SESSION_SECRET
 TURNSTILE_SECRET
 LICENSE_SIGNING_PRIVATE_KEY
+OFFLINE_RSA_PRIVATE_KEY
 ```
 
 `DEVICE_PROOF_SECRET` 已不再是当前生产协议必需项。
+
+---
+
+# 手机扫码离线激活
+
+CleanC 1.6.8 的离线流程与在线激活使用同一授权码、同一设备绑定和同一授权总到期时间：
+
+```text
+电脑生成一次性二维码
+→ 手机扫描公开 /offline/activate 页面
+→ 手机输入 CLC 授权码
+→ 服务器确认授权并绑定当前设备
+→ 手机显示 16 位短码
+→ 电脑点击“我已扫码”并输入短码
+```
+
+永久授权仍是永久授权；按天授权仍从首次成功绑定开始计算；固定到期授权仍按固定日期到期。离线短码不是完整 ECDSA Lease，而是当前二维码会话的短认证证明：会话 10 分钟有效，错误 5 次后作废，重新生成二维码会使旧会话失效。
+
+为了让 16 位输入同时携带类型和到期时间，短码的 80 位由授权元数据和截断 HMAC 组成，不应宣传为与完整 P-256 数字签名等强度。二维码中的一次性随机材料使用 `OFFLINE_RSA_PRIVATE_KEY` 通过 RSA-OAEP 解密，服务器私钥绝不进入客户端。
+
+新增 Cloudflare 加密 Secret：
+
+```text
+OFFLINE_RSA_PRIVATE_KEY
+```
+
+可以用以下命令生成 3072 位 RSA PKCS#8 私钥，然后把完整 PEM 粘贴到 Cloudflare Pages 的加密 Secret 中：
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072
+```
+
+如果未配置该 Secret，在线激活不受影响，但手机离线页面会明确提示尚未配置。
 
 完整填写示例请看：
 

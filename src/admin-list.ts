@@ -1,3 +1,4 @@
+import { effectiveStatusSql } from './license-status';
 import type { Env } from './worker';
 
 const encoder = new TextEncoder();
@@ -101,7 +102,10 @@ export async function handleAdminPaginatedList(
 
   if (path === '/admin/api/licenses') {
     const statusRaw = cleanQuery(url.searchParams.get('status'), 20);
-    const status = statusRaw === 'active' || statusRaw === 'disabled' ? statusRaw : '';
+    const status = ['active','disabled','expired','invalid'].includes(statusRaw) ? statusRaw : '';
+    const type = cleanQuery(url.searchParams.get('type'),20);
+    const binding = cleanQuery(url.searchParams.get('binding'),20);
+    const effective = effectiveStatusSql('l');
 
     const where: string[] = ['l.deleted_at IS NULL'];
     const bindings: unknown[] = [];
@@ -111,10 +115,14 @@ export async function handleAdminPaginatedList(
       bindings.push(likePattern(q));
     }
     if (status) {
-      where.push('l.status=?');
-      bindings.push(status);
+      if(status==='invalid') where.push(`(${effective}) <> 'active'`);
+      else { where.push(`(${effective}) = ?`); bindings.push(status); }
     }
 
+    if(['permanent','duration','fixed'].includes(type)){where.push('l.license_type=?');bindings.push(type);}
+    const bound = 'EXISTS (SELECT 1 FROM devices d WHERE d.license_id=l.id AND d.revoked_at IS NULL)';
+    if(binding==='bound')where.push(bound);
+    if(binding==='unbound')where.push('NOT '+bound);
     const whereSql = where.join(' AND ');
     const count = await env.DB.prepare(
       `SELECT COUNT(*) AS total FROM licenses l WHERE ${whereSql}`,
@@ -128,6 +136,7 @@ export async function handleAdminPaginatedList(
     const { results } = await env.DB.prepare(`
       SELECT
         l.*,
+        ${effective} AS effective_status,
         (
           SELECT COUNT(*)
           FROM devices d
@@ -143,7 +152,7 @@ export async function handleAdminPaginatedList(
       success: true,
       licenses: results,
       pagination: { page, pageSize, total, totalPages },
-      filters: { q, status: status || 'all' },
+      filters: { q, status: status || 'all', type, binding },
     });
   }
 
@@ -194,3 +203,4 @@ export async function handleAdminPaginatedList(
     filters: { q, binding: binding || 'all' },
   });
 }
+
