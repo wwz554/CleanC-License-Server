@@ -1,4 +1,5 @@
 import type { Env } from './worker';
+import { readJsonObject, RequestError, normalizePem } from './request-json';
 
 const API_VERSION = 3;
 const LEASE_VERSION = 4;
@@ -111,7 +112,7 @@ function leaseHours(env: Env): number {
 }
 
 async function importSigningKey(env: Env): Promise<CryptoKey> {
-  const pem = String(env.LICENSE_SIGNING_PRIVATE_KEY || '');
+  const pem = normalizePem(String(env.LICENSE_SIGNING_PRIVATE_KEY || ''));
   if (signingKeyCache?.pem === pem) return signingKeyCache.promise;
   const raw = pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s+/g, '');
   if (!raw) throw new Error('SIGNING_KEY_MISSING');
@@ -233,12 +234,12 @@ export async function handleProductionActivation(request: Request, env: Env): Pr
 
   let body: Record<string, unknown>;
   try {
-    body = await request.json() as Record<string, unknown>;
-  } catch {
-    return json({ success: false, code: 'INVALID_JSON', message: '请求 JSON 格式无效' }, 400);
+    body = await readJsonObject(request,64*1024);
+  } catch(error) {
+    return json({ success: false, code: 'INVALID_JSON', message: error instanceof RequestError?error.message:'请求 JSON 格式无效' }, error instanceof RequestError?error.status:400);
   }
 
-  const licenseKey = String(body.licenseKey || '').trim();
+  const licenseKey = String(body.licenseKey || '').trim().toUpperCase();
   const deviceId = String(body.deviceId || '').trim();
   const publicKeyPem = String(body.devicePublicKey || '').trim();
   if (!licenseKey || licenseKey.length > 200 || !deviceId || deviceId.length > 200 || !publicKeyPem || publicKeyPem.length > 4000) {

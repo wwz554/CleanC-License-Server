@@ -464,7 +464,7 @@ function isExpired(license: LicenseRecord): boolean {
 }
 
 async function importSigningKey(env: Env): Promise<CryptoKey> {
-  const pem = String(env.LICENSE_SIGNING_PRIVATE_KEY || '');
+  const pem = normalizePem(String(env.LICENSE_SIGNING_PRIVATE_KEY || ''));
   if (signingKeyCache?.pem === pem) return signingKeyCache.promise;
   const raw = pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s+/g, '');
   if (!raw) throw new Error('SIGNING_KEY_MISSING');
@@ -885,3 +885,4 @@ export async function handlePagesRequest(request: Request, env: Env): Promise<Re
 
   return worker.fetch(request, env);
 }
+import { normalizePem } from './request-json';

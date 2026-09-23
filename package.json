@@ -6,11 +6,13 @@
   "scripts": {
     "build": "npm run typecheck && npm run check:admin",
     "typecheck": "tsc --noEmit",
+    "test": "node scripts/test-1.6.8.mjs",
     "check:admin": "node --experimental-strip-types scripts/check-admin-html.mjs",
     "pages:dev": "wrangler pages dev public"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260917.1",
+    "esbuild": "0.28.1",
     "typescript": "7.0.2",
     "wrangler": "4.133.0"
   }
