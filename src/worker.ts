@@ -8,6 +8,7 @@ export interface Env {
   DEVICE_PROOF_SECRET: string;
   TURNSTILE_SECRET: string;
   LICENSE_SIGNING_PRIVATE_KEY: string;
+  OFFLINE_RSA_PRIVATE_KEY?: string;
   APP_NAME?: string;
   TURNSTILE_SITE_KEY?: string;
   LEASE_HOURS?: string;

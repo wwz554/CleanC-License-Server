@@ -98,7 +98,7 @@ async function consumeRateLimit(env: Env, key: string, max: number, seconds: num
 }
 
 async function importSigningKey(env: Env): Promise<CryptoKey> {
-  const pem = String(env.LICENSE_SIGNING_PRIVATE_KEY || '');
+  const pem = normalizePem(String(env.LICENSE_SIGNING_PRIVATE_KEY || ''));
   if (signingKeyCache?.pem === pem) return signingKeyCache.promise;
   const raw = pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s+/g, '');
   if (!raw) throw new Error('SIGNING_KEY_MISSING');
@@ -586,3 +586,4 @@ export async function handleProductionRequest(request: Request, env: Env): Promi
   return handlePagesRequest(request, env);
 }
 
+import { normalizePem } from './request-json';
