@@ -21,4 +21,6 @@ jobs:
         run: npm install
       - name: TypeScript check
         run: npm run build
+      - name: Licensing and security regressions (isolated SQLite and ephemeral keys)
+        run: npm test
 
