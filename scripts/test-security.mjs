@@ -61,6 +61,7 @@ assert.equal(offlineGrant.purpose,'offline-entitlement-v1');assert.equal(offline
 assert.equal(offlineGrant.lease.licenseExpiresAt,null);assert.equal(offlineGrant.lease.deviceId,binding.deviceId);
 assert.equal(offlineGrant.lease.expiresAt,'9999-12-31T23:59:59.9999999+00:00');
 assert.equal(offlineGrant.requestHash,'');assert.equal(offlineGrant.codeHash,'');
+assert.equal(offlineGrant.challengeNonce,offlineNonce);
 assert.equal((await handle(post('/api/v1/offline/challenge',{deviceId:'UNBOUND'}),env)).status,403);
 console.log('PASS automatic offline migration requires device proof and returns signed full-term entitlement');
 async function challenge(){const r=await handle(post('/api/v1/device/challenge',binding),env);assert.equal(r.status,200);return(await r.json()).nonce;}
