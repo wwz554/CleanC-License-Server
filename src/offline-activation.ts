@@ -29,7 +29,7 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
    const response=await handleProductionRequest(new Request(new URL(target,request.url),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':request.headers.get('cf-connecting-ip')||'unknown'},body:JSON.stringify({...body,licenseKey:row.license_key})}),env);
    if(path.endsWith('/challenge')||!response.ok)return response;
    const payload=await response.json() as Record<string,unknown>;
-   const offlineProof=await offlineCredential(env,payload.lease as Record<string,unknown>);
+   const offlineProof=await offlineCredential(env,payload.lease as Record<string,unknown>,'','',body.nonce as string);
    return reply({...payload,offlineProof,licenseKey:row.license_key},response.status);
   }catch(error){return error instanceof RequestError?reply({success:false,message:error.message},error.status):reply({success:false,code:'OFFLINE_UNAVAILABLE',message:'授权服务暂时不可用，请稍后重试。'},503);}
  }
@@ -41,7 +41,7 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
  try{key=await crypto.subtle.importKey('pkcs8',decode(normalizePem(secret).replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g,'')),{name:'RSA-OAEP',hash:'SHA-256'},false,['decrypt']);}
  catch{return reply({success:false,code:'OFFLINE_KEY_INVALID',message:'服务器离线密钥配置无效，请联系管理员。'},503);}
  if(!env.LICENSE_SIGNING_PRIVATE_KEY)return reply({success:false,code:'SIGNING_NOT_CONFIGURED',message:'签名服务尚未配置。'},503);
- if(readiness)return reply({success:true,legacyOfflineReady:false,protocol:'offline-v3',signedCredential:true,minimumClientVersion:'1.7.2'});
+ if(readiness)return reply({success:true,legacyOfflineReady:false,protocol:'offline-v3',signedCredential:true,refreshProofBoundToChallenge:true,minimumClientVersion:'1.7.2'});
  if(!request.headers.get('content-type')?.includes('application/json'))return reply({success:false,message:'请求格式无效'},415);
  const ip=request.headers.get('cf-connecting-ip')||'unknown',now=Date.now(),window=Math.floor(now/60000);
  let clear:Uint8Array|undefined;let reservedSession:string|undefined;let validated=false;
@@ -125,7 +125,7 @@ form.addEventListener('submit',async e=>{
    const url=URL.createObjectURL(new Blob([JSON.stringify(data.credential)],{type:'application/json'}));
    const a=document.createElement('a');a.href=url;a.download='CleanC-offline.cleanc-license';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
   };
-  m.textContent='请下载凭证文件，通过 USB 或文件传输发送至这台电脑。在电脑点击“我已扫码”，导入文件并输入以上 16 位码。请在本次扫码的 10 分钟内完成；重新扫码可用原授权码领取，不会延长或重置有效期。微信无法下载时请在系统浏览器打开本页。'+(data.expiresAt?'有效期至 '+new Date(data.expiresAt).toLocaleString():'永久授权');form.hidden=true;
+  m.textContent='请下载凭证文件，通过 USB 或文件传输发送至这台电脑。在电脑点击“我已扫码”，导入文件并输入以上 16 位码。请在本次扫码的 10 分钟内完成；重新扫码可用原授权码领取，不会延长或重置有效期。微信无法下载时，请用手机相机重新扫描电脑上的同一个码，在系统浏览器领取。'+(data.expiresAt?'有效期至 '+new Date(data.expiresAt).toLocaleString():'永久授权');form.hidden=true;
  }catch(err){m.textContent=err.name==='AbortError'?'网络响应超时，可以直接重试；不要立即更换二维码。':err.message;}
  finally{clearTimeout(timer);b.disabled=false;}
 });
