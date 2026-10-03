@@ -49,6 +49,20 @@ const wrongKey=await handle(post('/api/v1/license/activate',{...binding,devicePu
 assert.equal(wrongKey.status,403);assert.equal((await wrongKey.json()).code,'DEVICE_KEY_MISMATCH');
 assert.equal(sql.prepare('SELECT count(*) n FROM devices WHERE revoked_at IS NULL').get().n,1);
 console.log('PASS signed online lease, one license per CleanC or ProcessScope device, no silent key replacement');
+// Legacy upgrade uses possession of the EXISTING device key, never a local grant.
+const offlineChallenge=await handle(post('/api/v1/offline/challenge',{deviceId:binding.deviceId}),env);
+assert.equal(offlineChallenge.status,200);const offlineNonce=(await offlineChallenge.json()).nonce;
+assert.equal((await handle(post('/api/v1/offline/refresh',{deviceId:binding.deviceId,nonce:offlineNonce,signature:'invalid'}),env)).status,403);
+const migrated=await handle(post('/api/v1/offline/refresh',{deviceId:binding.deviceId,nonce:offlineNonce,signature:sign('sha256',Buffer.from(offlineNonce),{key:device.privateKey,dsaEncoding:'ieee-p1363'}).toString('base64url')}),env);
+assert.equal(migrated.status,200);const signedOffline=(await migrated.json()).offlineProof;
+assert.ok(verify('sha256',Buffer.from(signedOffline.signedPayload,'base64url'),{key:server.publicKey,dsaEncoding:'ieee-p1363'},Buffer.from(signedOffline.signature,'base64url')));
+const offlineGrant=JSON.parse(Buffer.from(signedOffline.signedPayload,'base64url'));
+assert.equal(offlineGrant.purpose,'offline-entitlement-v1');assert.equal(offlineGrant.lease.isPermanent,true);
+assert.equal(offlineGrant.lease.licenseExpiresAt,null);assert.equal(offlineGrant.lease.deviceId,binding.deviceId);
+assert.equal(offlineGrant.lease.expiresAt,'9999-12-31T23:59:59.9999999+00:00');
+assert.equal(offlineGrant.requestHash,'');assert.equal(offlineGrant.codeHash,'');
+assert.equal((await handle(post('/api/v1/offline/challenge',{deviceId:'UNBOUND'}),env)).status,403);
+console.log('PASS automatic offline migration requires device proof and returns signed full-term entitlement');
 async function challenge(){const r=await handle(post('/api/v1/device/challenge',binding),env);assert.equal(r.status,200);return(await r.json()).nonce;}
 function refreshBody(nonce,key=device.privateKey){return{licenseKey:binding.licenseKey,deviceId:binding.deviceId,nonce,signature:sign('sha256',Buffer.from(nonce),{key,dsaEncoding:'ieee-p1363'}).toString('base64url')};}
 let nonce=await challenge();

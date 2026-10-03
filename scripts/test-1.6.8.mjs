@@ -1,5 +1,5 @@
 import {DatabaseSync} from 'node:sqlite';
-import {generateKeyPairSync,publicEncrypt,createHash,createHmac,constants} from 'node:crypto';
+import {generateKeyPairSync,publicEncrypt,createHash,createHmac,constants,verify} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {pathToFileURL} from 'node:url';
@@ -17,7 +17,7 @@ const rsa=generateKeyPairSync('rsa',{modulusLength:3072});const ec=generateKeyPa
 const env={DB:{prepare,async batch(statements){sql.exec('BEGIN');try{for(const x of statements)await x.run();sql.exec('COMMIT')}catch(e){sql.exec('ROLLBACK');throw e}}},OFFLINE_RSA_PRIVATE_KEY:rsa.privateKey.export({type:'pkcs8',format:'pem'}),LICENSE_SIGNING_PRIVATE_KEY:ec.privateKey.export({type:'pkcs8',format:'pem'}),SESSION_SECRET:'test-only-secret'};
 function add(id,type='permanent',days=null,expiry=null,status='active'){sql.prepare('INSERT INTO licenses VALUES(?,?,?,?,?,?,?,NULL,?,NULL,NULL)').run(id,'CLC-'+id.toUpperCase(),'standard',status,type,days,expiry,new Date().toISOString())}
 add('permanent');add('one-day','duration',1);add('fixed','fixed',null,new Date(Date.now()+86400000).toISOString());add('expired','fixed',null,new Date(Date.now()-1000).toISOString());add('disabled','permanent',null,null,'disabled');
-function session(deviceId){const secret=crypto.getRandomValues(new Uint8Array(32));const q={v:2,app:'CleanC',sessionId:crypto.randomUUID().replaceAll('-',''),deviceId,devicePublicKey:ec.publicKey.export({type:'spki',format:'pem'}).toString(),createdAt:Date.now()-1000};const digest=createHash('sha256').update(JSON.stringify([q.v,q.app,q.sessionId,q.deviceId,q.devicePublicKey,q.createdAt])).digest();q.box=publicEncrypt({key:rsa.publicKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING},Buffer.concat([secret,digest])).toString('base64url');const r=Buffer.from(JSON.stringify(q)).toString('base64url');return {q,r,secret}}
+function session(deviceId){const secret=crypto.getRandomValues(new Uint8Array(32));const q={v:3,app:'CleanC',sessionId:crypto.randomUUID().replaceAll('-',''),deviceId,devicePublicKey:ec.publicKey.export({type:'spki',format:'pem'}).toString(),createdAt:Date.now()-1000};const digest=createHash('sha256').update(JSON.stringify([q.v,q.app,q.sessionId,q.deviceId,q.devicePublicKey,q.createdAt])).digest();q.box=publicEncrypt({key:rsa.publicKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING},Buffer.concat([secret,digest])).toString('base64url');const r=Buffer.from(JSON.stringify(q)).toString('base64url');return {q,r,secret}}
 async function issue(s,key){return handleOffline(new Request('https://test/offline'.replace('/offline','/api/v1/offline/issue'),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':'test'},body:JSON.stringify({request:s.r,licenseKey:key})}),env)}
 for(const [id,type] of [['permanent','permanent'],['one-day','duration'],['fixed','fixed']]){const s=session('DEVICE-'+id);const result=await issue(s,'CLC-'+id.toUpperCase()); // keys are case insensitive at boundary; fixtures match production uppercase
  if(result.status!==200){const data=await result.json();throw Error(JSON.stringify(data))}
@@ -31,6 +31,24 @@ const payload=Buffer.from(JSON.stringify({exp:Date.now()+60000})).toString('base
 const list=await handleAdminPaginatedList(new Request('https://test/admin/api/licenses?status=expired',{headers:{cookie:'cleanc_session='+payload+'.'+sig}}),env);assert.equal((await list.json()).licenses.length,1);
 for(const m of offlinePage.matchAll(/<script>([\s\S]*?)<\/script>/g))new Function(m[1]);
 console.log('PASS: offline permanent, 1-day duration, fixed expiry, MAC, idempotent retry, expired/disabled, device binding, filters, unauthorized access, mobile JS');
+// A second phone issuance preserves activation epoch and exact total expiry.
+sql.prepare('DELETE FROM rate_limits').run();
+const before=sql.prepare("SELECT activated_at,expires_at FROM licenses WHERE id='one-day'").get();
+const renewal=session('DEVICE-one-day');const fresh=await(await issue(renewal,'CLC-ONE-DAY')).json();
+assert.equal(fresh.success,true);
+assert.deepEqual(sql.prepare("SELECT activated_at,expires_at FROM licenses WHERE id='one-day'").get(),before);
+assert.equal(fresh.expiresAt,before.expires_at);
+assert.ok(verify('sha256',Buffer.from(fresh.credential.signedPayload,'base64url'),{key:ec.publicKey,dsaEncoding:'ieee-p1363'},Buffer.from(fresh.credential.signature,'base64url')));
+const proof=JSON.parse(Buffer.from(fresh.credential.signedPayload,'base64url'));
+assert.equal(proof.purpose,'offline-entitlement-v1');assert.equal(proof.app,'CleanC');
+assert.equal(proof.lease.renewalProtocol,'offline-v3');assert.equal(proof.lease.leaseHours,0);
+assert.equal(proof.lease.expiresAt,before.expires_at);assert.equal(proof.lease.licenseExpiresAt,before.expires_at);
+assert.equal(proof.requestHash,createHash('sha256').update(renewal.r).digest('hex'));
+assert.equal(proof.codeHash,createHash('sha256').update(fresh.code.replaceAll('-','')).digest('hex'));
+assert.ok(!JSON.stringify(fresh.credential).includes('CLC-ONE-DAY'));
+const legacy=session('legacy');legacy.q.v=2;legacy.r=Buffer.from(JSON.stringify(legacy.q)).toString('base64url');
+assert.equal((await issue(legacy,'CLC-ONE-DAY')).status,409);
+console.log('PASS: signed offline-v3 file, request/PIN binding, exact expiry preserved on reissue, legacy issuance retired');
 // Configuration, malformed input, bounded chunked bodies and interrupted responses.
 const endpoint='https://test/api/v1/offline/issue';
 const req=(body)=>new Request(endpoint,{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':crypto.randomUUID()},body});
