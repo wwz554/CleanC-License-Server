@@ -6,7 +6,7 @@
   "scripts": {
     "build": "npm run typecheck && npm run check:admin",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test-1.6.8.mjs",
+    "test": "node scripts/test-1.6.8.mjs && node scripts/test-security.mjs",
     "check:admin": "node --experimental-strip-types scripts/check-admin-html.mjs",
     "pages:dev": "wrangler pages dev public"
   },

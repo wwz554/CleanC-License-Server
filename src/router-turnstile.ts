@@ -3,6 +3,7 @@ import { handleAdminPhysicalDelete } from './admin-delete';
 import { handleAdminPaginatedList } from './admin-list';
 import { applyBeijingAdminResponse } from './admin-timezone';
 import { handleAppRequest } from './router';
+import { readJsonObject, RequestError } from './request-json';
 import type { Env } from './worker';
 
 /**
@@ -12,6 +13,20 @@ import type { Env } from './worker';
  */
 export async function handleTurnstileAppRequest(request: Request, env: Env): Promise<Response> {
   const path = new URL(request.url).pathname;
+  // Bound actual streamed bytes before outer login/renewal handlers clone or parse JSON.
+  if (request.body && (path.startsWith('/api/') || path.startsWith('/admin/api/'))) {
+    try {
+      const body = await readJsonObject(request, path === '/api/v1/offline/issue' ? 12000 : 64 * 1024);
+      const headers = new Headers(request.headers);
+      headers.delete('content-length');
+      headers.delete('content-encoding');
+      request = new Request(request.url, { method: request.method, headers, body: JSON.stringify(body) });
+    } catch (error) {
+      if (!(error instanceof RequestError)) throw error;
+      return Response.json({ success: false, code: error.status === 413 ? 'REQUEST_TOO_LARGE' : 'INVALID_JSON', message: error.message },
+        { status: error.status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+    }
+  }
   const isAdminLoginPage = (path === '/admin' || path === '/admin/' || path === '/admin/login') && request.method === 'GET';
   const isAdminLoginApi = path === '/admin/api/login' && request.method === 'POST';
 

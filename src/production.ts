@@ -113,7 +113,7 @@ async function importSigningKey(env: Env): Promise<CryptoKey> {
   return promise;
 }
 
-async function signObject(env: Env, value: Record<string, unknown>): Promise<{ signedPayload: string; signature: string }> {
+export async function signObject(env: Env, value: Record<string, unknown>): Promise<{ signedPayload: string; signature: string }> {
   const serialized = JSON.stringify(value);
   const key = await importSigningKey(env);
   const signature = await crypto.subtle.sign(

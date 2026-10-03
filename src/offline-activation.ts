@@ -1,6 +1,7 @@
 import type { Env } from './worker';
 import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
+import { offlineCredential } from './offline-credential';
 import { readJsonObject, RequestError, normalizePem } from './request-json';
 const enc=new TextEncoder();
 const alphabet='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -28,7 +29,8 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
    const response=await handleProductionRequest(new Request(new URL(target,request.url),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':request.headers.get('cf-connecting-ip')||'unknown'},body:JSON.stringify({...body,licenseKey:row.license_key})}),env);
    if(path.endsWith('/challenge')||!response.ok)return response;
    const payload=await response.json() as Record<string,unknown>;
-   return reply({...payload,licenseKey:row.license_key},response.status);
+   const offlineProof=await offlineCredential(env,payload.lease as Record<string,unknown>);
+   return reply({...payload,offlineProof,licenseKey:row.license_key},response.status);
   }catch(error){return error instanceof RequestError?reply({success:false,message:error.message},error.status):reply({success:false,code:'OFFLINE_UNAVAILABLE',message:'授权服务暂时不可用，请稍后重试。'},503);}
  }
  const readiness=path==='/api/v1/offline/readiness'&&request.method==='GET';
@@ -38,7 +40,8 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
  let key:CryptoKey;
  try{key=await crypto.subtle.importKey('pkcs8',decode(normalizePem(secret).replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g,'')),{name:'RSA-OAEP',hash:'SHA-256'},false,['decrypt']);}
  catch{return reply({success:false,code:'OFFLINE_KEY_INVALID',message:'服务器离线密钥配置无效，请联系管理员。'},503);}
- if(readiness)return reply({success:true,legacyOfflineReady:true,protocol:'offline-v2',security:'client-shared-secret',message:'离线密钥格式有效；仍需核对客户端公钥配对并进行真实激活验收。'});
+ if(!env.LICENSE_SIGNING_PRIVATE_KEY)return reply({success:false,code:'SIGNING_NOT_CONFIGURED',message:'签名服务尚未配置。'},503);
+ if(readiness)return reply({success:true,legacyOfflineReady:false,protocol:'offline-v3',signedCredential:true,minimumClientVersion:'1.7.2'});
  if(!request.headers.get('content-type')?.includes('application/json'))return reply({success:false,message:'请求格式无效'},415);
  const ip=request.headers.get('cf-connecting-ip')||'unknown',now=Date.now(),window=Math.floor(now/60000);
  let clear:Uint8Array|undefined;let reservedSession:string|undefined;let validated=false;
@@ -48,7 +51,8 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
   const body=await readJsonObject(request),r=String(body.request||''),licenseKey=String(body.licenseKey||'').trim().toUpperCase();
   if(r.length>8000||!licenseKey||licenseKey.length>200)throw Error('format');
   const q=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(decode(r)));
-  if(!q||q.v!==2||q.app!=='CleanC'||!/^\w{32}$/.test(q.sessionId)||typeof q.deviceId!=='string'||q.deviceId.length>200||!q.deviceId||typeof q.devicePublicKey!=='string'||q.devicePublicKey.length>2000||!Number.isSafeInteger(q.createdAt)||q.createdAt>now+120000||now-q.createdAt>600000||typeof q.box!=='string'||q.box.length>600)throw Error('format');
+  if(q?.v===2)return reply({success:false,code:'CLIENT_UPGRADE_REQUIRED',message:'请先将电脑上的 CleanC 升级到 1.7.2 或更高版本，再重新扫码领取签名凭证。原授权到期时间不变。'},409);
+  if(!q||q.v!==3||q.app!=='CleanC'||!/^\w{32}$/.test(q.sessionId)||typeof q.deviceId!=='string'||q.deviceId.length>200||!q.deviceId||typeof q.devicePublicKey!=='string'||q.devicePublicKey.length>2000||!Number.isSafeInteger(q.createdAt)||q.createdAt>now+120000||now-q.createdAt>600000||typeof q.box!=='string'||q.box.length>600)throw Error('format');
   clear=new Uint8Array(await crypto.subtle.decrypt({name:'RSA-OAEP'},key,decode(q.box)));
   if(clear.length!==64)throw Error('box');
   // OAEP binds the one-time secret to the exact request context.
@@ -71,11 +75,11 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
   }
   reservedSession=q.sessionId;
 
-  const activation=new Request(new URL('/api/v1/license/activate',request.url),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':ip},body:JSON.stringify({licenseKey,deviceId:q.deviceId,devicePublicKey:q.devicePublicKey,deviceName:'Windows PC (offline)',appVersion:'1.6.8'})});
+  const activation=new Request(new URL('/api/v1/license/activate',request.url),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':ip},body:JSON.stringify({licenseKey,deviceId:q.deviceId,devicePublicKey:q.devicePublicKey,deviceName:'Windows PC (offline)',appVersion:'1.7.2'})});
   const result=await handleProductionActivation(activation,env);
   if(!result.ok){await env.DB.prepare('DELETE FROM offline_activation_sessions WHERE session_id=? AND status=?').bind(q.sessionId,'pending').run();reservedSession=undefined;return result;}
   const hmac=await crypto.subtle.importKey('raw',clear.slice(0,32),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-  const accepted=await result.json() as {lease:{licenseType:string;licenseExpiresAt:string|null}};
+  const accepted=await result.json() as {lease:Record<string,unknown>&{licenseType:string;licenseExpiresAt:string|null}};
   const type=accepted.lease.licenseType;
   const minutes=type==='permanent'?0:Math.floor((Date.parse(accepted.lease.licenseExpiresAt||'')-Date.UTC(2020,0,1))/60000);
   if(!Number.isSafeInteger(minutes)||minutes<0||minutes>0x3fffffff)throw Error('expiry');
@@ -83,7 +87,9 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
   const tag=new Uint8Array(await crypto.subtle.sign('HMAC',hmac,enc.encode('CleanC/offline/v2\n'+r+'\n'+meta)));
   const packed=new Uint8Array(10);new DataView(packed.buffer).setUint32(0,meta);packed.set(tag.slice(0,6),4);
   const code=shortCode(packed);
-  const receipt={success:true,code:code.match(/.{4}/g)!.join('-'),expiresAt:type==='permanent'?null:new Date(Date.UTC(2020,0,1)+minutes*60000).toISOString(),licenseType:type};
+  const codeHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(code)))).map(x=>x.toString(16).padStart(2,'0')).join('');
+  const credential=await offlineCredential(env,accepted.lease,hash,codeHash);
+  const receipt={success:true,code:code.match(/.{4}/g)!.join('-'),expiresAt:accepted.lease.licenseExpiresAt,licenseType:type,credential};
   await env.DB.batch([
    env.DB.prepare('INSERT INTO offline_activation_receipts VALUES(?,?,?)').bind(q.sessionId,JSON.stringify(receipt),q.createdAt+600000),
    env.DB.prepare("UPDATE offline_activation_sessions SET status='issued' WHERE session_id=?").bind(q.sessionId),
@@ -98,7 +104,7 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
   return reply({success:false,code:'OFFLINE_REQUEST_INVALID',message:'二维码无效、已超时或与服务器密钥不匹配，请重新生成；仍失败请联系管理员。'},400);
  }finally{clear?.fill(0);}
 }
-export const offlinePage=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CleanC 离线激活</title><style>*{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#173052;background:radial-gradient(at 0 0,#d2ecff,transparent 60%),radial-gradient(at 100% 80%,#e8dfff,transparent 60%),#f4f8ff}main{width:100%;max-width:460px;padding:32px;background:#ffffffbe;backdrop-filter:blur(30px);border:1px solid white;border-radius:30px;box-shadow:0 24px 80px #294b7520}input,button{width:100%;font:inherit;padding:16px;border-radius:15px;margin:8px 0;border:1px solid #d4deed}button{background:#2673e6;color:white;cursor:pointer;min-height:48px}button:disabled{opacity:.5}p{line-height:1.7;color:#62728a}output{display:block;font-size:24px;font-weight:700;overflow-wrap:anywhere;margin:20px 0}input:focus-visible,button:focus-visible{outline:3px solid #438cff;outline-offset:3px}</style><main><small>CLEANC · LICENSE</small><h1>离线激活</h1><p>输入授权码，获取当前电脑专用的 16 位激活码。与在线激活采用相同授权类型和到期时间。</p><form id="form"><label for="key">授权码</label><input id="key" autocomplete="off" maxlength="200" placeholder="CLC-XXXX-XXXX-XXXX-XXXX" required><button id="submit">确认授权</button></form><output id="result" aria-live="polite"></output><p id="message">无需登录管理后台。二维码十分钟内有效。</p></main><script>
+export const offlinePage=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CleanC 离线激活</title><style>*{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#173052;background:radial-gradient(at 0 0,#d2ecff,transparent 60%),radial-gradient(at 100% 80%,#e8dfff,transparent 60%),#f4f8ff}main{width:100%;max-width:460px;padding:32px;background:#ffffffbe;backdrop-filter:blur(30px);border:1px solid white;border-radius:30px;box-shadow:0 24px 80px #294b7520}input,button{width:100%;font:inherit;padding:16px;border-radius:15px;margin:8px 0;border:1px solid #d4deed}button{background:#2673e6;color:white;cursor:pointer;min-height:48px}button:disabled{opacity:.5}p{line-height:1.7;color:#62728a}output{display:block;font-size:24px;font-weight:700;overflow-wrap:anywhere;margin:20px 0}input:focus-visible,button:focus-visible{outline:3px solid #438cff;outline-offset:3px}</style><main><small>CLEANC · LICENSE</small><h1>离线激活</h1><p>输入授权码，获取 16 位激活码和签名凭证文件。将文件传到电脑导入，原到期时间不变。</p><form id="form"><label for="key">授权码</label><input id="key" autocomplete="off" maxlength="200" placeholder="CLC-XXXX-XXXX-XXXX-XXXX" required><button id="submit">确认授权</button></form><output id="result" aria-live="polite"></output><button id="download" type="button" hidden>下载签名凭证文件</button><p id="message">无需登录管理后台。二维码十分钟内有效。</p></main><script>
 const form=document.getElementById('form'),b=document.getElementById('submit'),m=document.getElementById('message');
 const supplied=location.hash.slice(1);let r=supplied;
 try{
@@ -114,7 +120,12 @@ form.addEventListener('submit',async e=>{
  try{
   const data=await readResponse(await fetch('/api/v1/offline/issue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request:r,licenseKey:document.getElementById('key').value}),cache:'no-store',signal:controller.signal}));
   document.getElementById('result').textContent=data.code;document.getElementById('key').value='';
-  m.textContent='请在电脑点击“我已扫码”，输入以上激活码。'+(data.expiresAt?'有效期至 '+new Date(data.expiresAt).toLocaleString():'永久授权');form.hidden=true;
+  const download=document.getElementById('download');
+  download.hidden=false;download.onclick=()=>{
+   const url=URL.createObjectURL(new Blob([JSON.stringify(data.credential)],{type:'application/json'}));
+   const a=document.createElement('a');a.href=url;a.download='CleanC-offline.cleanc-license';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  };
+  m.textContent='请下载凭证文件，通过 USB 或文件传输发送至这台电脑。在电脑点击“我已扫码”，导入文件并输入以上 16 位码。请在本次扫码的 10 分钟内完成；重新扫码可用原授权码领取，不会延长或重置有效期。微信无法下载时请在系统浏览器打开本页。'+(data.expiresAt?'有效期至 '+new Date(data.expiresAt).toLocaleString():'永久授权');form.hidden=true;
  }catch(err){m.textContent=err.name==='AbortError'?'网络响应超时，可以直接重试；不要立即更换二维码。':err.message;}
  finally{clearTimeout(timer);b.disabled=false;}
 });
