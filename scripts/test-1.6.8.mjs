@@ -17,7 +17,7 @@ const rsa=generateKeyPairSync('rsa',{modulusLength:3072});const ec=generateKeyPa
 const env={DB:{prepare,async batch(statements){sql.exec('BEGIN');try{for(const x of statements)await x.run();sql.exec('COMMIT')}catch(e){sql.exec('ROLLBACK');throw e}}},OFFLINE_RSA_PRIVATE_KEY:rsa.privateKey.export({type:'pkcs8',format:'pem'}),LICENSE_SIGNING_PRIVATE_KEY:ec.privateKey.export({type:'pkcs8',format:'pem'}),SESSION_SECRET:'test-only-secret'};
 function add(id,type='permanent',days=null,expiry=null,status='active'){sql.prepare('INSERT INTO licenses VALUES(?,?,?,?,?,?,?,NULL,?,NULL,NULL)').run(id,'CLC-'+id.toUpperCase(),'standard',status,type,days,expiry,new Date().toISOString())}
 add('permanent');add('one-day','duration',1);add('fixed','fixed',null,new Date(Date.now()+86400000).toISOString());add('expired','fixed',null,new Date(Date.now()-1000).toISOString());add('disabled','permanent',null,null,'disabled');
-function session(deviceId){const secret=crypto.getRandomValues(new Uint8Array(32));const q={v:3,app:'CleanC',sessionId:crypto.randomUUID().replaceAll('-',''),deviceId,devicePublicKey:ec.publicKey.export({type:'spki',format:'pem'}).toString(),createdAt:Date.now()-1000};const digest=createHash('sha256').update(JSON.stringify([q.v,q.app,q.sessionId,q.deviceId,q.devicePublicKey,q.createdAt])).digest();q.box=publicEncrypt({key:rsa.publicKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING},Buffer.concat([secret,digest])).toString('base64url');const r=Buffer.from(JSON.stringify(q)).toString('base64url');return {q,r,secret}}
+function session(deviceId,version=3){const secret=crypto.getRandomValues(new Uint8Array(32));const q={v:version,app:'CleanC',sessionId:crypto.randomUUID().replaceAll('-',''),deviceId,devicePublicKey:ec.publicKey.export({type:'spki',format:'pem'}).toString(),createdAt:Date.now()-1000};const digest=createHash('sha256').update(JSON.stringify([q.v,q.app,q.sessionId,q.deviceId,q.devicePublicKey,q.createdAt])).digest();q.box=publicEncrypt({key:rsa.publicKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING},Buffer.concat([secret,digest])).toString('base64url');const r=Buffer.from(JSON.stringify(q)).toString('base64url');return {q,r,secret}}
 async function issue(s,key){return handleOffline(new Request('https://test/offline'.replace('/offline','/api/v1/offline/issue'),{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':'test'},body:JSON.stringify({request:s.r,licenseKey:key})}),env)}
 for(const [id,type] of [['permanent','permanent'],['one-day','duration'],['fixed','fixed']]){const s=session('DEVICE-'+id);const result=await issue(s,'CLC-'+id.toUpperCase()); // keys are case insensitive at boundary; fixtures match production uppercase
  if(result.status!==200){const data=await result.json();throw Error(JSON.stringify(data))}
@@ -49,6 +49,20 @@ assert.ok(!JSON.stringify(fresh.credential).includes('CLC-ONE-DAY'));
 const legacy=session('legacy');legacy.q.v=2;legacy.r=Buffer.from(JSON.stringify(legacy.q)).toString('base64url');
 assert.equal((await issue(legacy,'CLC-ONE-DAY')).status,409);
 console.log('PASS: signed offline-v3 file, request/PIN binding, exact expiry preserved on reissue, legacy issuance retired');
+// New code-only client shares binding and expiry logic; no file transport is required.
+sql.prepare('DELETE FROM rate_limits').run();
+const compact=session('DEVICE-one-day',4),compactResponse=await issue(compact,'CLC-ONE-DAY');
+assert.equal(compactResponse.status,200);const compactGrant=await compactResponse.json();
+assert.equal(compactGrant.codeOnly,true);assert.equal(compactGrant.expiresAt,before.expires_at);
+assert.deepEqual(sql.prepare("SELECT activated_at,expires_at FROM licenses WHERE id='one-day'").get(),before);
+assert.equal(compactGrant.code.replaceAll('-','').length,16);
+const compactMeta=(1*0x40000000+Math.floor((Date.parse(before.expires_at)-Date.UTC(2020,0,1))/60000))>>>0;
+const compactBytes=Buffer.alloc(10);compactBytes.writeUInt32BE(compactMeta);
+createHmac('sha256',compact.secret).update('CleanC/offline/v2\n'+compact.r+'\n'+compactMeta).digest().copy(compactBytes,4,0,6);
+assert.equal(compactGrant.code.replaceAll('-',''),shortCode(compactBytes));
+assert.deepEqual(await(await issue(compact,'CLC-ONE-DAY')).json(),compactGrant);
+assert.equal((await issue(session('PSCOPE-OTHER',4),'CLC-ONE-DAY')).status,409);
+console.log('PASS: code-only v4 PIN, MAC, idempotent retry, original expiry and exclusive product/device binding');
 // Configuration, malformed input, bounded chunked bodies and interrupted responses.
 const endpoint='https://test/api/v1/offline/issue';
 const req=(body)=>new Request(endpoint,{method:'POST',headers:{'content-type':'application/json','cf-connecting-ip':crypto.randomUUID()},body});
