@@ -1,5 +1,7 @@
 import { handlePagesRequest } from './pages';
+import { handleProductionActivation } from './activation';
 import type { Env } from './worker';
+import { productFeatures, productMismatch, PRODUCTS } from './products';
 
 const API_VERSION = 3;
 const LEASE_VERSION = 4;
@@ -11,6 +13,7 @@ let signingKeyCache: { pem: string; promise: Promise<CryptoKey> } | null = null;
 type LicenseRecord = {
   id: string;
   license_key: string;
+  product: string;
   edition: string;
   status: string;
   license_type: 'permanent' | 'duration' | 'fixed';
@@ -255,7 +258,7 @@ async function initialize(request: Request, env: Env): Promise<Response | null> 
 
 async function loadLicense(env: Env, licenseKey: string): Promise<LicenseRecord | null> {
   return env.DB.prepare(`
-    SELECT id,license_key,edition,status,license_type,duration_days,expires_at,activated_at
+    SELECT id,license_key,product,edition,status,license_type,duration_days,expires_at,activated_at
     FROM licenses
     WHERE license_key=? AND deleted_at IS NULL
   `).bind(licenseKey).first<LicenseRecord>();
@@ -286,6 +289,7 @@ async function issueProductionLease(
   const lease = {
     version: LEASE_VERSION,
     apiVersion: API_VERSION,
+    product: license.product,
     licenseId: license.id,
     deviceId,
     edition: license.edition,
@@ -293,7 +297,7 @@ async function issueProductionLease(
     isPermanent: permanent,
     displayText: permanent ? '永久授权' : null,
     countdownRequired: !permanent,
-    features: ['clean', 'scan', 'optimize'],
+    features: productFeatures(license.product),
     issuedAt: new Date(now).toISOString(),
     serverTime: new Date(now).toISOString(),
     expiresAt: new Date(Math.min(leaseLimit, totalLimit)).toISOString(),
@@ -301,6 +305,7 @@ async function issueProductionLease(
     leaseHours: hours,
     renewalProtocol: 'challenge-refresh',
     singleDeviceLicense: true,
+    products: PRODUCTS,
     nonce: crypto.randomUUID(),
   } satisfies Record<string, unknown>;
   const signed = await signObject(env, lease);
@@ -318,29 +323,6 @@ async function readBodyClone(request: Request): Promise<Record<string, unknown> 
   } catch {
     return null;
   }
-}
-
-async function maybeReplaceActivationLease(
-  request: Request,
-  env: Env,
-  coreResponse: Response,
-  body: Record<string, unknown> | null,
-): Promise<Response> {
-  if (!coreResponse.ok || !body) return coreResponse;
-  let payload: { success?: boolean } | null = null;
-  try {
-    payload = await coreResponse.clone().json() as { success?: boolean };
-  } catch {
-    return coreResponse;
-  }
-  if (payload?.success !== true) return coreResponse;
-
-  const licenseKey = String(body.licenseKey || '').trim();
-  const deviceId = String(body.deviceId || '').trim();
-  if (!licenseKey || !deviceId) return coreResponse;
-  const license = await loadLicense(env, licenseKey);
-  if (!license) return coreResponse;
-  return issueProductionLease(request, env, license, deviceId);
 }
 
 async function validateAdminLicenseCreate(request: Request): Promise<Response | null> {
@@ -366,7 +348,7 @@ async function handleProductionChallenge(request: Request, env: Env): Promise<Re
   }
   const body = await readBodyClone(request);
   if (!body) return json({ success: false, code: 'INVALID_JSON', message: '请求格式无效' }, 400);
-  const licenseKey = String(body.licenseKey || '').trim();
+  const licenseKey = String(body.licenseKey || '').trim().toUpperCase();
   const deviceId = String(body.deviceId || '').trim();
   if (!licenseKey || !deviceId || deviceId.length > 200) {
     return json({ success: false, code: 'INVALID_REQUEST', message: '缺少授权码或设备标识' }, 400);
@@ -374,6 +356,7 @@ async function handleProductionChallenge(request: Request, env: Env): Promise<Re
 
   const license = await loadLicense(env, licenseKey);
   if (!license) return json({ success: false, code: 'LICENSE_NOT_FOUND', message: '授权码不存在' }, 404);
+  const mismatch = productMismatch(body, license.product); if (mismatch) return mismatch;
   const device = await loadActiveDevice(env, license.id, deviceId);
   if (!device?.public_key) {
     return json({ success: false, code: 'DEVICE_NOT_BOUND', message: '设备未绑定或已解绑' }, 403);
@@ -416,7 +399,7 @@ async function handleProductionRefresh(request: Request, env: Env): Promise<Resp
   const body = await readBodyClone(request);
   if (!body) return json({ success: false, code: 'INVALID_JSON', message: '请求格式无效' }, 400);
 
-  const licenseKey = String(body.licenseKey || '').trim();
+  const licenseKey = String(body.licenseKey || '').trim().toUpperCase();
   const deviceId = String(body.deviceId || '').trim();
   const nonce = String(body.nonce || '').trim();
   const signature = String(body.signature || '').trim();
@@ -426,6 +409,7 @@ async function handleProductionRefresh(request: Request, env: Env): Promise<Resp
 
   let license = await loadLicense(env, licenseKey);
   if (!license) return json({ success: false, code: 'LICENSE_NOT_FOUND', message: '授权码不存在' }, 404);
+  const mismatch = productMismatch(body, license.product); if (mismatch) return mismatch;
   const device = await loadActiveDevice(env, license.id, deviceId);
   if (!device?.public_key) {
     return json({ success: false, code: 'DEVICE_NOT_BOUND', message: '设备未绑定或已解绑，请重新激活' }, 403);
@@ -524,6 +508,7 @@ async function health(): Promise<Response> {
     leaseVersion: LEASE_VERSION,
     renewalProtocol: 'challenge-refresh',
     singleDeviceLicense: true,
+    products: PRODUCTS,
   });
 }
 
@@ -536,6 +521,7 @@ async function meta(request: Request, env: Env): Promise<Response> {
     leaseHours: leaseHours(env),
     renewalProtocol: 'challenge-refresh',
     singleDeviceLicense: true,
+    products: PRODUCTS,
     permanentDisplayText: '永久授权',
   });
 }
@@ -549,6 +535,7 @@ async function bootstrap(request: Request, env: Env): Promise<Response> {
     leaseHours: leaseHours(env),
     renewalProtocol: 'challenge-refresh',
     singleDeviceLicense: true,
+    products: PRODUCTS,
     permanentDisplayText: '永久授权',
   } satisfies Record<string, unknown>;
   return json({ ...payload, ...await signObject(env, payload) });
@@ -578,9 +565,8 @@ export async function handleProductionRequest(request: Request, env: Env): Promi
   }
 
   if (path === '/api/v1/license/activate' && request.method === 'POST') {
-    const body = await readBodyClone(request);
-    const response = await handlePagesRequest(request, env);
-    return maybeReplaceActivationLease(request, env, response, body);
+    // Mobile/offline callers must use the same product checks BEFORE binding.
+    return handleProductionActivation(request, env);
   }
 
   return handlePagesRequest(request, env);

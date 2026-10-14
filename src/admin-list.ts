@@ -99,6 +99,8 @@ export async function handleAdminPaginatedList(
   const requestedPage = positiveInt(url.searchParams.get('page'), 1, 1_000_000);
   const pageSize = positiveInt(url.searchParams.get('pageSize'), 10, 50);
   const q = cleanQuery(url.searchParams.get('q'));
+  const product = cleanQuery(url.searchParams.get('product'),20);
+  if(product && !['CleanC','NetIME'].includes(product)) return json({success:false,code:'INVALID_PRODUCT',message:'产品筛选无效'},400);
 
   if (path === '/admin/api/licenses') {
     const statusRaw = cleanQuery(url.searchParams.get('status'), 20);
@@ -109,6 +111,7 @@ export async function handleAdminPaginatedList(
 
     const where: string[] = ['l.deleted_at IS NULL'];
     const bindings: unknown[] = [];
+    if(product){where.push('l.product=?');bindings.push(product);}
 
     if (q) {
       where.push("l.license_key LIKE ? ESCAPE '\\'");
@@ -152,7 +155,7 @@ export async function handleAdminPaginatedList(
       success: true,
       licenses: results,
       pagination: { page, pageSize, total, totalPages },
-      filters: { q, status: status || 'all', type, binding },
+      filters: { q, status: status || 'all', type, binding, product: product || 'all' },
     });
   }
 
@@ -161,6 +164,7 @@ export async function handleAdminPaginatedList(
 
   const where: string[] = [];
   const bindings: unknown[] = [];
+  if(product){where.push('l.product=?');bindings.push(product);}
 
   if (q) {
     where.push(`(
@@ -188,7 +192,7 @@ export async function handleAdminPaginatedList(
   const offset = (page - 1) * pageSize;
 
   const { results } = await env.DB.prepare(`
-    SELECT d.*,l.license_key
+    SELECT d.*,l.license_key,l.product
     FROM devices d
     JOIN licenses l ON l.id=d.license_id
     ${whereSql}
@@ -200,7 +204,7 @@ export async function handleAdminPaginatedList(
     success: true,
     devices: results,
     pagination: { page, pageSize, total, totalPages },
-    filters: { q, binding: binding || 'all' },
+    filters: { q, binding: binding || 'all', product: product || 'all' },
   });
 }
 

@@ -1,4 +1,5 @@
 import type { Env } from './worker';
+import { productFeatures, productMismatch } from './products';
 import { readJsonObject, RequestError, normalizePem } from './request-json';
 
 const API_VERSION = 3;
@@ -9,6 +10,7 @@ let signingKeyCache: { pem: string; promise: Promise<CryptoKey> } | null = null;
 type LicenseRecord = {
   id: string;
   license_key: string;
+  product: string;
   edition: string;
   status: string;
   license_type: 'permanent' | 'duration' | 'fixed';
@@ -86,7 +88,7 @@ async function releaseLock(env: Env, lockKey: string, token: string): Promise<vo
 
 async function loadLicense(env: Env, licenseKey: string): Promise<LicenseRecord | null> {
   return env.DB.prepare(`
-    SELECT id,license_key,edition,status,license_type,duration_days,expires_at,activated_at
+    SELECT id,license_key,product,edition,status,license_type,duration_days,expires_at,activated_at
     FROM licenses
     WHERE license_key=? AND deleted_at IS NULL
   `).bind(licenseKey).first<LicenseRecord>();
@@ -194,6 +196,7 @@ async function issueLease(request: Request, env: Env, license: LicenseRecord, de
   const lease = {
     version: LEASE_VERSION,
     apiVersion: API_VERSION,
+    product: license.product,
     licenseId: license.id,
     deviceId,
     edition: license.edition,
@@ -201,7 +204,7 @@ async function issueLease(request: Request, env: Env, license: LicenseRecord, de
     isPermanent: permanent,
     displayText: permanent ? '永久授权' : null,
     countdownRequired: !permanent,
-    features: ['clean', 'scan', 'optimize'],
+    features: productFeatures(license.product),
     issuedAt: new Date(now).toISOString(),
     serverTime: new Date(now).toISOString(),
     expiresAt: new Date(Math.min(leaseLimit, totalLimit)).toISOString(),
@@ -280,6 +283,7 @@ export async function handleProductionActivation(request: Request, env: Env): Pr
       await auditSafe(env, request, 'LICENSE_REJECTED', { code: 'LICENSE_NOT_FOUND' }, null, deviceId);
       return json({ success: false, code: 'LICENSE_NOT_FOUND', message: '授权码不存在' }, 404);
     }
+    const mismatch = productMismatch(body, license.product); if (mismatch) return mismatch;
     if (license.status.toLowerCase() !== 'active') {
       return json({ success: false, code: 'LICENSE_DISABLED', message: '授权已被管理员禁用' }, 403);
     }

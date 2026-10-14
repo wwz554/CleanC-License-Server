@@ -10,4 +10,7 @@ node_modules/
 *.pfx
 *.log
 .DS_Store
+private-secrets/
+backups/
+src/owner-recovery-temporary.ts
 

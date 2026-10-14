@@ -816,6 +816,7 @@ async function handleActivation(request: Request, env: Env): Promise<Response> {
 export async function handlePagesRequest(request: Request, env: Env): Promise<Response> {
   try {
     await ensureSchema(env);
+    await ensureProductSchema(env);
   } catch (error) {
     console.error('D1 schema initialization failed', error);
     if (error instanceof Error && error.message === 'D1_BINDING_MISSING') {
@@ -886,3 +887,4 @@ export async function handlePagesRequest(request: Request, env: Env): Promise<Re
   return worker.fetch(request, env);
 }
 import { normalizePem } from './request-json';
+import { ensureProductSchema } from './products';

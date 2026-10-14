@@ -5,6 +5,7 @@ import { applyBeijingAdminResponse } from './admin-timezone';
 import { handleAppRequest } from './router';
 import { readJsonObject, RequestError } from './request-json';
 import type { Env } from './worker';
+import { ensureProductSchema } from './products';
 
 /**
  * 只在管理员登录链路增加 Turnstile。
@@ -44,6 +45,11 @@ export async function handleTurnstileAppRequest(request: Request, env: Env): Pro
   }
 
   // 授权/设备列表使用服务端分页与搜索，避免一次查询大量记录。
+  if (path === '/admin/api/licenses' || path === '/admin/api/devices') {
+    const ready = await handleAppRequest(new Request(new URL('/api/v1/health', request.url), { headers: request.headers }), env);
+    if (!ready.ok) return ready;
+    await ensureProductSchema(env);
+  }
   const paginated = await handleAdminPaginatedList(request, env);
   if (paginated) return applyBeijingAdminResponse(paginated, path);
 

@@ -1,5 +1,6 @@
 import { effectiveStatusSql } from './license-status';
 import { adminPage } from './admin';
+import { requestedProduct, productPrefix } from './products';
 
 export interface Env {
   DB: D1Database;
@@ -316,12 +317,14 @@ async function adminApi(req: Request, env: Env, path: string): Promise<Response>
     const type = ['permanent','duration','fixed'].includes(String(body.licenseType)) ? String(body.licenseType) : 'permanent';
     const durationDays = type === 'duration' ? positiveInt(body.durationDays, 365, 36500) : null; if (type === 'duration' && !durationDays) return fail('INVALID_DURATION', '有效天数必须为 1-36500 的整数');
     const expiresAt = type === 'fixed' ? validDate(body.expiresAt) : null; if (type === 'fixed' && (!expiresAt || new Date(expiresAt).getTime() <= Date.now())) return fail('INVALID_EXPIRES_AT', '固定到期时间必须是未来时间');
-    const customKey = String(body.licenseKey || '').trim(); if (count > 1 && customKey) return fail('CUSTOM_KEY_BATCH_NOT_ALLOWED', '批量生成时不能指定单个自定义授权码'); if (customKey && !validCustomLicenseKey(customKey)) return fail('INVALID_LICENSE_KEY', '自定义授权码仅允许 6-80 位字母、数字、下划线和短横线');
+    const product = requestedProduct(body); if (!product) return fail('INVALID_PRODUCT', '请选择 CleanC 或网工拼音');
+    const customKey = String(body.licenseKey || '').trim().toUpperCase();
+    if (customKey && ((product==='NetIME' && !/^NETIME-[A-Z0-9][A-Z0-9-]*[A-Z0-9]$/.test(customKey)) || (product==='CleanC' && customKey.startsWith('NETIME-')))) return fail('LICENSE_PRODUCT_MISMATCH','自定义授权码格式必须与所选产品一致'); if (count > 1 && customKey) return fail('CUSTOM_KEY_BATCH_NOT_ALLOWED', '批量生成时不能指定单个自定义授权码'); if (customKey && !validCustomLicenseKey(customKey)) return fail('INVALID_LICENSE_KEY', '自定义授权码仅允许 6-80 位字母、数字、下划线和短横线，网工拼音只允许字母数字及短横线');
     if (customKey && await env.DB.prepare('SELECT id FROM licenses WHERE license_key=?').bind(customKey).first()) return fail('LICENSE_KEY_EXISTS', '授权码已存在', 409);
     const created:string[]=[]; const statements:D1PreparedStatement[]=[]; const time=nowIso();
-    for (let i=0;i<count;i++) { const id=uuid(); const k=customKey||randomLicenseKey(); created.push(k); statements.push(env.DB.prepare('INSERT INTO licenses(id,license_key,edition,status,license_type,duration_days,expires_at,max_devices,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id,k,String(body.edition||'pro'),'active',type,durationDays,expiresAt,maxDevices,body.note?String(body.note).slice(0,500):null,time,time)); statements.push(env.DB.prepare('INSERT INTO audit_logs(id,event_type,ip,license_id,device_id,detail,created_at) VALUES(?,?,?,?,?,?,?)').bind(uuid(),count>1?'LICENSE_BATCH_CREATED':'LICENSE_CREATED',req.headers.get('cf-connecting-ip'),id,null,JSON.stringify({licenseKey:k}),time)); }
+    for (let i=0;i<count;i++) { const id=uuid(); const k=customKey||(productPrefix(product)+'-'+randomLicenseKey().replace(/^CLC-/,'')); created.push(k); statements.push(env.DB.prepare('INSERT INTO licenses(id,license_key,product,edition,status,license_type,duration_days,expires_at,max_devices,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(id,k,product,String(body.edition||'pro'),'active',type,durationDays,expiresAt,maxDevices,body.note?String(body.note).slice(0,500):null,time,time)); statements.push(env.DB.prepare('INSERT INTO audit_logs(id,event_type,ip,license_id,device_id,detail,created_at) VALUES(?,?,?,?,?,?,?)').bind(uuid(),count>1?'LICENSE_BATCH_CREATED':'LICENSE_CREATED',req.headers.get('cf-connecting-ip'),id,null,JSON.stringify({licenseKey:k,product}),time)); }
     try { await env.DB.batch(statements); } catch (e) { console.error(e); return fail('LICENSE_CREATE_FAILED', '授权码创建失败，请重试', 409); }
-    return json({ success:true, licenseKeys:created });
+    return json({ success:true, licenseKeys:created,product });
   }
   const la=path.match(/^\/admin\/api\/licenses\/([^/]+)\/(disable|enable)$/); if (la && req.method==='POST') { const status=la[2]==='disable'?'disabled':'active'; const r=await env.DB.prepare('UPDATE licenses SET status=?,updated_at=? WHERE id=? AND deleted_at IS NULL').bind(status,nowIso(),la[1]).run(); if(!r.meta.changes)return fail('LICENSE_NOT_FOUND','授权不存在',404); await audit(env,req,status==='disabled'?'LICENSE_DISABLED':'LICENSE_ENABLED',null,la[1]); return json({success:true}); }
   if (path==='/admin/api/devices'&&req.method==='GET') { const {results}=await env.DB.prepare('SELECT d.*,l.license_key FROM devices d JOIN licenses l ON l.id=d.license_id ORDER BY d.last_seen_at DESC LIMIT 500').all(); return json({success:true,devices:results}); }
