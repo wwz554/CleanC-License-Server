@@ -1,4 +1,5 @@
 import type { Env } from './worker';
+import { productMismatch } from './products';
 import { handleProductionActivation } from './activation';
 import { handleProductionRequest } from './production';
 import { offlineCredential } from './offline-credential';
@@ -22,7 +23,7 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
  if(path==='/offline/activate'&&request.method==='GET')return new Response(offlinePage,{headers:{'content-type':'text/html;charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','content-security-policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",'x-content-type-options':'nosniff'}});
  if((path==='/api/v1/offline/challenge'||path==='/api/v1/offline/refresh')&&request.method==='POST'){
   try{
-   const body=await readJsonObject(request);if(typeof body.deviceId!=='string'||body.deviceId.length>200)return reply({success:false,code:'DEVICE_NOT_BOUND'},400);
+   const body=await readJsonObject(request);const mismatch=productMismatch(body,'CleanC');if(mismatch)return mismatch;if(typeof body.deviceId!=='string'||body.deviceId.length>200)return reply({success:false,code:'DEVICE_NOT_BOUND'},400);
    const row=await env.DB.prepare('SELECT l.license_key FROM devices d JOIN licenses l ON l.id=d.license_id WHERE d.device_id=? AND d.revoked_at IS NULL AND l.deleted_at IS NULL LIMIT 1').bind(body.deviceId).first<{license_key:string}>();
    if(!row)return reply({success:false,code:'DEVICE_NOT_BOUND',message:'设备已解绑'},403);
    const target=path.endsWith('/challenge')?'/api/v1/device/challenge':'/api/v1/license/refresh';
@@ -53,6 +54,7 @@ export async function handleOffline(request:Request,env:Env):Promise<Response|nu
   const q=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(decode(r)));
   if(q?.v===2)return reply({success:false,code:'CLIENT_UPGRADE_REQUIRED',message:'请先将电脑上的 CleanC 升级到 1.7.2 或更高版本，再重新扫码领取签名凭证。原授权到期时间不变。'},409);
   if(!q||![3,4].includes(q.v)||q.app!=='CleanC'||!/^\w{32}$/.test(q.sessionId)||typeof q.deviceId!=='string'||q.deviceId.length>200||!q.deviceId||typeof q.devicePublicKey!=='string'||q.devicePublicKey.length>2000||!Number.isSafeInteger(q.createdAt)||q.createdAt>now+120000||now-q.createdAt>600000||typeof q.box!=='string'||q.box.length>600)throw Error('format');
+  const productError=productMismatch({...body,deviceId:q.deviceId},'CleanC');if(productError)return productError;
   clear=new Uint8Array(await crypto.subtle.decrypt({name:'RSA-OAEP'},key,decode(q.box)));
   if(clear.length!==64)throw Error('box');
   // OAEP binds the one-time secret to the exact request context.
